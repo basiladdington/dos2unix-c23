@@ -1,0 +1,58 @@
+# Project Conventions & Engineering Workflow (ISO C23)
+
+## 1. Repository Map & Scope Boundaries
+- **Active Source Directory:** `dos2unix/` (`dos2unix.c`, `unix2dos.c`, `common.c`, `querycp.c`, and corresponding `.h` headers).
+- **Off-Limits Packaging Files:** Do NOT modify top-level `Makefile`, `sandbox/`, `upload_sf.lftp`, or `man/`/`po/` translation files.
+- **Scope Lock:** Refactor only the specific file(s) requested in the prompt. Do not make drive-by edits to unrelated modules.
+
+## 2. Mandatory 4-Phase Engineering Workflow
+Execute these four phases in order for every task:
+
+### Phase 1: Recon & Plan (Read-Only)
+1. Inspect the target `.c` and `.h` files and check all callers across `dos2unix/`.
+2. Run `clang-tidy` on the target file to list existing diagnostics.
+3. Present a concise **Change Plan** covering:
+   - Specific ISO C23 upgrades (`nullptr`, `bool`, `constexpr`, `uint32_t`, `[[nodiscard]]`, `<stdckdint.h>`).
+   - Any header signatures, preprocessor `#ifdef` blocks, or callers affected.
+   - Existing comments requiring updates or expansion.
+4. **Stop and wait for user approval** before editing files (unless instructed to execute immediately).
+
+### Phase 2: Implementation & Formatting
+1. Apply approved C23 upgrades cleanly without changing external CLI behavior.
+2. Preserve all cross-platform `#ifdef` blocks (`_WIN32`, `__OS2__`, `D2U_UNICODE`, `ENABLE_NLS`).
+3. Run `clang-format -i` on every modified `.c` and `.h` file to match `.clang-format`.
+
+### Phase 3: Build, Sanitizers & Regression Verification
+1. **Strict C23 Release Build:**
+   `make -C dos2unix clean && make -C dos2unix CC=clang CFLAGS="-std=c23 -O2 -Wall -Wextra -Wconversion -Wpedantic -g" dos2unix unix2dos`
+2. **Runtime Sanitizer Check (`ASan` + `UBSan`):**
+   Compile with `-fsanitize=address,undefined -fno-omit-frame-pointer` and run `~/Projects/c23-sandbox/scripts/verify.sh` to verify zero memory or undefined-behavior errors, then rebuild with standard flags above.
+3. **Static Analysis:**
+   Run `clang-tidy -p . -checks='-*,bugprone-*,cert-*,readability-*'` on modified `.c` files and confirm zero new warnings.
+
+### Phase 4: Comment & Code Audit Report
+Put on an **Auditor Hat** and review `git diff` before concluding:
+1. Confirm **zero existing comments, ASCII banners, or docblocks were stripped or truncated**.
+2. Confirm every modified function's documentation accurately reflects its new C23 types, return values, and invariants.
+3. Deliver a concise **Audit Summary** listing compiler/sanitizer results, `verify.sh` status, comment audit notes, and a suggested Git commit message (do not commit unless asked).
+
+---
+
+## 3. ISO C23 Modernization Standards
+- Replace `NULL` with `nullptr`.
+- Replace custom boolean macros (`TRUE`/`FALSE` or integer flags used strictly as booleans) with native `bool`, `true`, and `false`.
+- Replace integer and string-length `#define` macros with `constexpr` where valid in C23.
+- Use unsigned fixed-width integers (`uint32_t` from `<stdint.h>`) for bitmask fields instead of signed `int`.
+- Add `[[nodiscard]]` to functions returning error codes or allocated pointers.
+- Use `<stdckdint.h>` (`ckd_add`, `ckd_mul`) where buffer allocation sizes are computed.
+
+## 4. Documentation & Comment Rules (CRITICAL)
+- **Never Strip Comments:** Preserve all existing file headers, ASCII banners, function docblocks, and inline notes.
+- **No Hidden Knowledge:** Document all architectural constraints, OS workarounds, and buffer invariants directly inside the source code.
+- **Explain the "Why":** When adding C23 safeguards (`[[nodiscard]]`, `constexpr`, checked arithmetic), add concise comments explaining *why* the safeguard exists for future maintainers.
+
+## 5. Stop & Ask Escalation Triggers
+Pause and ask the user before proceeding if a change requires:
+- Altering a shared function signature or struct layout in a `.h` header file.
+- Modifying `dos2unix/Makefile` or adding external library dependencies.
+- Suppressing a compiler or `clang-tidy` warning instead of fixing the root cause.

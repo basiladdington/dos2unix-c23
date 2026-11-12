@@ -59,30 +59,29 @@
  *
  */
 
-
 /* #define DEBUG 1 */
 #define __DOS2UNIX_C
 
-#include "common.h"
 #include "dos2unix.h"
-# if (defined(_WIN32) && !defined(__CYGWIN__))
+#include "common.h"
+#if (defined(_WIN32) && !defined(__CYGWIN__))
 #include <windows.h>
 #endif
 #ifdef D2U_UNICODE
-#if !defined(__MSDOS__) && !defined(_WIN32) && !defined(__OS2__)  /* Unix, Cygwin */
-# include <langinfo.h>
+#if !defined(__MSDOS__) && !defined(_WIN32) && !defined(__OS2__) /* Unix, Cygwin */
+#include <langinfo.h>
 #endif
 #endif
 
-void PrintLicense(void)
-{
-  D2U_ANSI_FPRINTF(stdout,_("\
+void PrintLicense(void) {
+    D2U_ANSI_FPRINTF(stdout, _("\
 Copyright (C) 2009-%d Erwin Waterlander\n\
 Copyright (C) 1998      Christian Wurll (Version 3.1)\n\
 Copyright (C) 1998      Bernd Johannes Wuebben (Version 3.0)\n\
 Copyright (C) 1994-1995 Benjamin Lin\n\
-All rights reserved.\n\n"),2026);
-  PrintBSDLicense();
+All rights reserved.\n\n"),
+                     2026);
+    PrintBSDLicense();
 }
 
 #ifdef D2U_UNICODE
@@ -95,8 +94,8 @@ int dos2unixW(BufferedStream *ipInF, FILE *ipOutF, CFlag *ipFlag, const char *pr
     PreviousChar = d2u_getwc(ipInF, ipFlag->bomtype);
     if (PreviousChar == WEOF) {
         if (ferror(ipInF->file)) {
-           d2u_getc_error(ipFlag, progname);
-           return -1;
+            d2u_getc_error(ipFlag, progname);
+            return -1;
         }
         logConverted(0, ipFlag->verbose, progname, converted, line_nr);
         return 0; /* empty file */
@@ -121,8 +120,8 @@ int dos2unixW(BufferedStream *ipInF, FILE *ipOutF, CFlag *ipFlag, const char *pr
             return -1;
         }
 
-        if (NextChar == 0x0a) { /* an LF */
-            ++line_nr; /* Count all DOS and Unix line breaks */
+        if (NextChar == 0x0a) {         /* an LF */
+            ++line_nr;                  /* Count all DOS and Unix line breaks */
             if (PreviousChar == 0x0d) { /* CR-LF combination */
                 converted++;
                 if (ipFlag->NewLine) { /* add additional LF? */
@@ -160,8 +159,7 @@ int dos2unixW(BufferedStream *ipInF, FILE *ipOutF, CFlag *ipFlag, const char *pr
         return -1;
     }
 
-    if (NextChar == WEOF && ipFlag->add_eol && PreviousChar != WEOF
-            && PreviousChar != 0x0a) {
+    if (NextChar == WEOF && ipFlag->add_eol && PreviousChar != WEOF && PreviousChar != 0x0a) {
         /* Add missing line break at the last line. */
         if (ipFlag->verbose > 1) {
             D2U_UTF8_FPRINTF(stderr, "%s: ", progname);
@@ -174,25 +172,25 @@ int dos2unixW(BufferedStream *ipInF, FILE *ipOutF, CFlag *ipFlag, const char *pr
         }
     }
     d2u_check_surrogate_state(ipFlag, progname);
-    if (ipFlag->status & UNICODE_CONVERSION_ERROR)
+    if (ipFlag->status & UNICODE_CONVERSION_ERROR) {
         ipFlag->line_nr = line_nr;
+    }
     logConverted(0, ipFlag->verbose, progname, converted, line_nr);
     return 0;
 }
 
-int mac2unixW(BufferedStream* ipInF, FILE* ipOutF, CFlag *ipFlag, const char *progname) {
+int mac2unixW(BufferedStream *ipInF, FILE *ipOutF, CFlag *ipFlag, const char *progname) {
     wint_t PreviousChar = WEOF;
     wint_t PPreviousChar = WEOF;
     wint_t NextChar;
     unsigned int line_nr = 1;
     unsigned int converted = 0;
 
-
     PreviousChar = d2u_getwc(ipInF, ipFlag->bomtype);
     if (PreviousChar == WEOF) {
         if (ferror(ipInF->file)) {
-           d2u_getc_error(ipFlag, progname);
-           return -1;
+            d2u_getc_error(ipFlag, progname);
+            return -1;
         }
         logConverted(0, ipFlag->verbose, progname, converted, line_nr);
         return 0; /* empty file */
@@ -219,13 +217,13 @@ int mac2unixW(BufferedStream* ipInF, FILE* ipOutF, CFlag *ipFlag, const char *pr
         }
 
         if (PreviousChar == 0x0d) { /* A CR */
-            if (NextChar == 0x0a){/* A CR-LF combination, put CR */
+            if (NextChar == 0x0a) { /* A CR-LF combination, put CR */
                 if (d2u_putwc(0x0d, ipOutF, ipFlag, progname) == WEOF) {
                     d2u_putwc_error(ipFlag, progname);
                     ipFlag->line_nr = line_nr;
                     return -1;
                 }
-            } else  { /* No CR-LF combination, put LF */
+            } else { /* No CR-LF combination, put LF */
                 ++line_nr;
                 converted++;
                 if (d2u_putwc(0x0a, ipOutF, ipFlag, progname) == WEOF) {
@@ -261,20 +259,20 @@ int mac2unixW(BufferedStream* ipInF, FILE* ipOutF, CFlag *ipFlag, const char *pr
     }
 
     if (PreviousChar == 0x0d) { /* A CR */
-         ++line_nr;
-         converted++;
-         if (d2u_putwc(0x0a, ipOutF, ipFlag, progname) == WEOF) {
-             d2u_putwc_error(ipFlag, progname);
-             ipFlag->line_nr = line_nr;
-             return -1;
-         }
-         if (ipFlag->NewLine) { /* add additional LF? */
-             if (d2u_putwc(0x0a, ipOutF, ipFlag, progname) == WEOF) {
-                 d2u_putwc_error(ipFlag, progname);
-                 ipFlag->line_nr = line_nr;
-                 return -1;
-             }
-         }
+        ++line_nr;
+        converted++;
+        if (d2u_putwc(0x0a, ipOutF, ipFlag, progname) == WEOF) {
+            d2u_putwc_error(ipFlag, progname);
+            ipFlag->line_nr = line_nr;
+            return -1;
+        }
+        if (ipFlag->NewLine) { /* add additional LF? */
+            if (d2u_putwc(0x0a, ipOutF, ipFlag, progname) == WEOF) {
+                d2u_putwc_error(ipFlag, progname);
+                ipFlag->line_nr = line_nr;
+                return -1;
+            }
+        }
     } else {
         if (PreviousChar == 0x0a && PPreviousChar != 0x0d) { /* An LF */
             ++line_nr; /* Count all Mac and Unix line breaks */
@@ -286,22 +284,23 @@ int mac2unixW(BufferedStream* ipInF, FILE* ipOutF, CFlag *ipFlag, const char *pr
         }
     }
 
-
-    if (NextChar == WEOF && ipFlag->add_eol && PreviousChar != WEOF && !(PreviousChar == 0x0a || PreviousChar == 0x0d)) {
-      /* Add missing line break at the last line. */
+    if (NextChar == WEOF && ipFlag->add_eol && PreviousChar != WEOF &&
+        !(PreviousChar == 0x0a || PreviousChar == 0x0d)) {
+        /* Add missing line break at the last line. */
         if (ipFlag->verbose > 1) {
             D2U_UTF8_FPRINTF(stderr, "%s: ", progname);
             D2U_UTF8_FPRINTF(stderr, _("Added line break to last line.\n"));
         }
         if (d2u_putwc(0x0a, ipOutF, ipFlag, progname) == WEOF) {
-            d2u_putwc_error(ipFlag,progname);
+            d2u_putwc_error(ipFlag, progname);
             ipFlag->line_nr = line_nr;
             return -1;
         }
     }
     d2u_check_surrogate_state(ipFlag, progname);
-    if (ipFlag->status & UNICODE_CONVERSION_ERROR)
+    if (ipFlag->status & UNICODE_CONVERSION_ERROR) {
         ipFlag->line_nr = line_nr;
+    }
     logConverted(0, ipFlag->verbose, progname, converted, line_nr);
     return 0;
 }
@@ -310,8 +309,7 @@ int mac2unixW(BufferedStream* ipInF, FILE* ipOutF, CFlag *ipFlag, const char *pr
  * RetVal: 0  if success
  *         -1  otherwise
  */
-int ConvertDosToUnixW(BufferedStream* ipInF, FILE* ipOutF, CFlag *ipFlag, const char *progname)
-{
+int ConvertDosToUnixW(BufferedStream *ipInF, FILE *ipOutF, CFlag *ipFlag, const char *progname) {
     int RetVal = 0;
 
     ipFlag->status = 0;
@@ -323,29 +321,28 @@ int ConvertDosToUnixW(BufferedStream* ipInF, FILE* ipOutF, CFlag *ipFlag, const 
     /* \x0a = Newline/Line Feed (LF) */
     /* \x0d = Carriage Return (CR) */
 
-    switch (ipFlag->FromToMode)
-    {
-      case FROMTO_DOS2UNIX: /* dos2unix */
-          RetVal = dos2unixW(ipInF, ipOutF, ipFlag, progname);
+    switch (ipFlag->FromToMode) {
+    case FROMTO_DOS2UNIX: /* dos2unix */
+        RetVal = dos2unixW(ipInF, ipOutF, ipFlag, progname);
         break;
-      case FROMTO_MAC2UNIX: /* mac2unix */
-          RetVal = mac2unixW(ipInF, ipOutF, ipFlag, progname);
+    case FROMTO_MAC2UNIX: /* mac2unix */
+        RetVal = mac2unixW(ipInF, ipOutF, ipFlag, progname);
         break;
-      default: /* unknown FromToMode */
-      ;
+    default: /* unknown FromToMode */
+        ;
 #if DEBUG
-      D2U_UTF8_FPRINTF(stderr, "%s: ", progname);
-      D2U_UTF8_FPRINTF(stderr, _("program error, invalid conversion mode %d\n"),ipFlag->FromToMode);
-      exit(1);
+        D2U_UTF8_FPRINTF(stderr, "%s: ", progname);
+        D2U_UTF8_FPRINTF(stderr, _("program error, invalid conversion mode %d\n"),
+                         ipFlag->FromToMode);
+        exit(1);
 #endif
     }
     return RetVal;
 }
 #endif
 
-
 int dos2unix(BufferedStream *ipInF, FILE *ipOutF, CFlag *ipFlag, const char *progname,
-        int *ConvTable) {
+             int *ConvTable) {
     int PreviousChar = EOF;
     int NextChar;
     unsigned int line_nr = 1;
@@ -354,8 +351,8 @@ int dos2unix(BufferedStream *ipInF, FILE *ipOutF, CFlag *ipFlag, const char *pro
     PreviousChar = d2u_getc(ipInF);
     if (PreviousChar == EOF) {
         if (ferror(ipInF->file)) {
-           d2u_getc_error(ipFlag, progname);
-           return -1;
+            d2u_getc_error(ipFlag, progname);
+            return -1;
         }
         logConverted(0, ipFlag->verbose, progname, converted, line_nr);
         return 0; /* empty file */
@@ -380,8 +377,8 @@ int dos2unix(BufferedStream *ipInF, FILE *ipOutF, CFlag *ipFlag, const char *pro
             return -1;
         }
 
-        if (NextChar == '\x0a') { /* an LF */
-            ++line_nr; /* Count all DOS and Unix line breaks */
+        if (NextChar == '\x0a') {         /* an LF */
+            ++line_nr;                    /* Count all DOS and Unix line breaks */
             if (PreviousChar == '\x0d') { /* CR-LF combination */
                 converted++;
                 if (ipFlag->NewLine) { /* add additional LF? */
@@ -415,8 +412,7 @@ int dos2unix(BufferedStream *ipInF, FILE *ipOutF, CFlag *ipFlag, const char *pro
         return -1;
     }
 
-    if (NextChar == EOF && ipFlag->add_eol && PreviousChar != EOF
-            && PreviousChar != '\x0a') {
+    if (NextChar == EOF && ipFlag->add_eol && PreviousChar != EOF && PreviousChar != '\x0a') {
         /* Add missing line break at the last line. */
         if (ipFlag->verbose > 1) {
             D2U_UTF8_FPRINTF(stderr, "%s: ", progname);
@@ -431,7 +427,8 @@ int dos2unix(BufferedStream *ipInF, FILE *ipOutF, CFlag *ipFlag, const char *pro
     return 0;
 }
 
-int mac2unix(BufferedStream* ipInF, FILE* ipOutF, CFlag *ipFlag, const char *progname, int *ConvTable) {
+int mac2unix(BufferedStream *ipInF, FILE *ipOutF, CFlag *ipFlag, const char *progname,
+             int *ConvTable) {
     int PreviousChar = EOF;
     int PPreviousChar = EOF;
     int NextChar;
@@ -441,8 +438,8 @@ int mac2unix(BufferedStream* ipInF, FILE* ipOutF, CFlag *ipFlag, const char *pro
     PreviousChar = d2u_getc(ipInF);
     if (PreviousChar == EOF) {
         if (ferror(ipInF->file)) {
-           d2u_getc_error(ipFlag, progname);
-           return -1;
+            d2u_getc_error(ipFlag, progname);
+            return -1;
         }
         logConverted(0, ipFlag->verbose, progname, converted, line_nr);
         return 0; /* empty file */
@@ -469,12 +466,12 @@ int mac2unix(BufferedStream* ipInF, FILE* ipOutF, CFlag *ipFlag, const char *pro
         }
 
         if (PreviousChar == '\x0d') { /* A CR */
-            if (NextChar == '\x0a'){/* A CR-LF combination, put CR */
+            if (NextChar == '\x0a') { /* A CR-LF combination, put CR */
                 if (fputc('\x0d', ipOutF) == EOF) {
                     d2u_putc_error(ipFlag, progname);
                     return -1;
                 }
-            } else  { /* No CR-LF combination, put LF */
+            } else { /* No CR-LF combination, put LF */
                 ++line_nr;
                 converted++;
                 if (fputc('\x0a', ipOutF) == EOF) {
@@ -507,18 +504,18 @@ int mac2unix(BufferedStream* ipInF, FILE* ipOutF, CFlag *ipFlag, const char *pro
     }
 
     if (PreviousChar == '\x0d') { /* A CR */
-         ++line_nr;
-         converted++;
-         if (fputc('\x0a', ipOutF) == EOF) {
-             d2u_putc_error(ipFlag, progname);
-             return -1;
-         }
-         if (ipFlag->NewLine) { /* add additional LF? */
-             if (fputc('\x0a', ipOutF) == EOF) {
-                 d2u_putc_error(ipFlag, progname);
-                 return -1;
-             }
-         }
+        ++line_nr;
+        converted++;
+        if (fputc('\x0a', ipOutF) == EOF) {
+            d2u_putc_error(ipFlag, progname);
+            return -1;
+        }
+        if (ipFlag->NewLine) { /* add additional LF? */
+            if (fputc('\x0a', ipOutF) == EOF) {
+                d2u_putc_error(ipFlag, progname);
+                return -1;
+            }
+        }
     } else {
         if (PreviousChar == '\x0a' && PPreviousChar != '\x0d') { /* An LF */
             ++line_nr; /* Count all Mac and Unix line breaks */
@@ -529,15 +526,15 @@ int mac2unix(BufferedStream* ipInF, FILE* ipOutF, CFlag *ipFlag, const char *pro
         }
     }
 
-
-    if (NextChar == EOF && ipFlag->add_eol && PreviousChar != EOF && !(PreviousChar == '\x0a' || PreviousChar == '\x0d')) {
-      /* Add missing line break at the last line. */
+    if (NextChar == EOF && ipFlag->add_eol && PreviousChar != EOF &&
+        !(PreviousChar == '\x0a' || PreviousChar == '\x0d')) {
+        /* Add missing line break at the last line. */
         if (ipFlag->verbose > 1) {
             D2U_UTF8_FPRINTF(stderr, "%s: ", progname);
             D2U_UTF8_FPRINTF(stderr, _("Added line break to last line.\n"));
         }
         if (fputc('\x0a', ipOutF) == EOF) {
-            d2u_putc_error(ipFlag,progname);
+            d2u_putc_error(ipFlag, progname);
             return -1;
         }
     }
@@ -549,51 +546,51 @@ int mac2unix(BufferedStream* ipInF, FILE* ipOutF, CFlag *ipFlag, const char *pro
  * RetVal: 0  if success
  *         -1  otherwise
  */
-int ConvertDosToUnix(BufferedStream* ipInF, FILE* ipOutF, CFlag *ipFlag, const char *progname)
-{
+int ConvertDosToUnix(BufferedStream *ipInF, FILE *ipOutF, CFlag *ipFlag, const char *progname) {
     int RetVal = 0;
     int *ConvTable;
 
     ipFlag->status = 0;
 
     switch (ipFlag->ConvMode) {
-      case CONVMODE_ASCII: /* ascii */
-      case CONVMODE_UTF16LE: /* Assume UTF-16LE, bomtype = FILE_UTF8 or GB18030 */
-      case CONVMODE_UTF16BE: /* Assume UTF-16BE, bomtype = FILE_UTF8 or GB18030 */
+    case CONVMODE_ASCII:   /* ascii */
+    case CONVMODE_UTF16LE: /* Assume UTF-16LE, bomtype = FILE_UTF8 or GB18030 */
+    case CONVMODE_UTF16BE: /* Assume UTF-16BE, bomtype = FILE_UTF8 or GB18030 */
         ConvTable = D2UAsciiTable;
         break;
-      case CONVMODE_7BIT: /* 7bit */
+    case CONVMODE_7BIT: /* 7bit */
         ConvTable = D2U7BitTable;
         break;
-      case CONVMODE_437: /* iso */
+    case CONVMODE_437: /* iso */
         ConvTable = D2UIso437Table;
         break;
-      case CONVMODE_850: /* iso */
+    case CONVMODE_850: /* iso */
         ConvTable = D2UIso850Table;
         break;
-      case CONVMODE_860: /* iso */
+    case CONVMODE_860: /* iso */
         ConvTable = D2UIso860Table;
         break;
-      case CONVMODE_863: /* iso */
+    case CONVMODE_863: /* iso */
         ConvTable = D2UIso863Table;
         break;
-      case CONVMODE_865: /* iso */
+    case CONVMODE_865: /* iso */
         ConvTable = D2UIso865Table;
         break;
-      case CONVMODE_1252: /* iso */
+    case CONVMODE_1252: /* iso */
         ConvTable = D2UIso1252Table;
         break;
-      default: /* unknown convmode */
-        ipFlag->status |= WRONG_CODEPAGE ;
-        return(-1);
+    default: /* unknown convmode */
+        ipFlag->status |= WRONG_CODEPAGE;
+        return (-1);
     }
     /* Turn off ISO and 7-bit conversion for Unicode text files */
-    if (ipFlag->bomtype > 0)
-      ConvTable = D2UAsciiTable;
+    if (ipFlag->bomtype > 0) {
+        ConvTable = D2UAsciiTable;
+    }
 
     if ((ipFlag->ConvMode > CONVMODE_7BIT) && (ipFlag->verbose)) { /* not ascii or 7bit */
-       D2U_UTF8_FPRINTF(stderr, "%s: ", progname);
-       D2U_UTF8_FPRINTF(stderr, _("using code page %d.\n"), ipFlag->ConvMode);
+        D2U_UTF8_FPRINTF(stderr, "%s: ", progname);
+        D2U_UTF8_FPRINTF(stderr, _("using code page %d.\n"), ipFlag->ConvMode);
     }
 
     /* CR-LF -> LF */
@@ -604,125 +601,129 @@ int ConvertDosToUnix(BufferedStream* ipInF, FILE* ipOutF, CFlag *ipFlag, const c
     /* \x0d = Carriage Return (CR) */
 
     switch (ipFlag->FromToMode) {
-      case FROMTO_DOS2UNIX: /* dos2unix */
-          RetVal = dos2unix(ipInF, ipOutF, ipFlag, progname, ConvTable);
+    case FROMTO_DOS2UNIX: /* dos2unix */
+        RetVal = dos2unix(ipInF, ipOutF, ipFlag, progname, ConvTable);
         break;
-      case FROMTO_MAC2UNIX: /* mac2unix */
-          RetVal = mac2unix(ipInF, ipOutF, ipFlag, progname, ConvTable);
+    case FROMTO_MAC2UNIX: /* mac2unix */
+        RetVal = mac2unix(ipInF, ipOutF, ipFlag, progname, ConvTable);
         break;
-      default: /* unknown FromToMode */
-      ;
+    default: /* unknown FromToMode */
+        ;
 #if DEBUG
-      D2U_UTF8_FPRINTF(stderr, "%s: ", progname);
-      D2U_UTF8_FPRINTF(stderr, _("program error, invalid conversion mode %d\n"),ipFlag->FromToMode);
-      exit(1);
+        D2U_UTF8_FPRINTF(stderr, "%s: ", progname);
+        D2U_UTF8_FPRINTF(stderr, _("program error, invalid conversion mode %d\n"),
+                         ipFlag->FromToMode);
+        exit(1);
 #endif
     }
     return RetVal;
 }
 
-
-int main (int argc, char *argv[])
-{
-  /* variable declarations */
-  char progname[9];
-  CFlag *pFlag;
-  char *ptr;
-  char localedir[1024];
-  int ret;
-# ifdef __MINGW64__
-  int _dowildcard = -1; /* enable wildcard expansion for Win64 */
-# endif
-  int  argc_new;
-  char **argv_new;
+int main(int argc, char *argv[]) {
+    /* variable declarations */
+    char progname[9];
+    CFlag *pFlag;
+    char *ptr;
+    char localedir[1024];
+    int ret;
+#ifdef __MINGW64__
+    int _dowildcard = -1; /* enable wildcard expansion for Win64 */
+#endif
+    int argc_new;
+    char **argv_new;
 #ifdef D2U_UNIFILE
-  wchar_t **wargv;
-  char ***argv_glob;
-# endif
-
-  progname[8] = '\0';
-  d2u_strncpy(progname, "dos2unix", sizeof(progname));
-
-#ifdef ENABLE_NLS
-   ptr = getenv("DOS2UNIX_LOCALEDIR");
-   if (ptr == NULL) {
-      d2u_strncpy(localedir, LOCALEDIR, sizeof(localedir));
-   } else {
-      if (strlen(ptr) < sizeof(localedir)) {
-         d2u_strncpy(localedir,ptr,sizeof(localedir));
-      } else {
-         D2U_UTF8_FPRINTF(stderr,"%s: ",progname);
-         D2U_ANSI_FPRINTF(stderr, "%s", _("error: Value of environment variable DOS2UNIX_LOCALEDIR is too long.\n"));
-         d2u_strncpy(localedir, LOCALEDIR, sizeof(localedir));
-      }
-   }
+    wchar_t **wargv;
+    char ***argv_glob;
 #endif
 
-#if defined(ENABLE_NLS) || (defined(D2U_UNICODE) && !defined(__MSDOS__) && !defined(_WIN32) && !defined(__OS2__))
+    progname[8] = '\0';
+    d2u_strncpy(progname, "dos2unix", sizeof(progname));
+
+#ifdef ENABLE_NLS
+    ptr = getenv("DOS2UNIX_LOCALEDIR");
+    if (ptr == NULL) {
+        d2u_strncpy(localedir, LOCALEDIR, sizeof(localedir));
+    } else {
+        if (strlen(ptr) < sizeof(localedir)) {
+            d2u_strncpy(localedir, ptr, sizeof(localedir));
+        } else {
+            D2U_UTF8_FPRINTF(stderr, "%s: ", progname);
+            D2U_ANSI_FPRINTF(
+                stderr, "%s",
+                _("error: Value of environment variable DOS2UNIX_LOCALEDIR is too long.\n"));
+            d2u_strncpy(localedir, LOCALEDIR, sizeof(localedir));
+        }
+    }
+#endif
+
+#if defined(ENABLE_NLS) ||                                                                         \
+    (defined(D2U_UNICODE) && !defined(__MSDOS__) && !defined(_WIN32) && !defined(__OS2__))
 /* setlocale() is also needed for nl_langinfo() */
 #if (defined(_WIN32) && !defined(__CYGWIN__))
-/* When the locale is set to "" on Windows all East-Asian multi-byte ANSI encoded text is printed
-   wrongly when you use standard printf(). Also UTF-8 code is printed wrongly. See also test/setlocale.c.
-   When we set the locale to "C" gettext still translates the messages on Windows. On Unix this would disable
-   gettext. */
-   setlocale (LC_ALL, "C");
+    /* When the locale is set to "" on Windows all East-Asian multi-byte ANSI encoded text is
+       printed wrongly when you use standard printf(). Also UTF-8 code is printed wrongly. See also
+       test/setlocale.c. When we set the locale to "C" gettext still translates the messages on
+       Windows. On Unix this would disable gettext. */
+    setlocale(LC_ALL, "C");
 #else
-   setlocale (LC_ALL, "");
+    setlocale(LC_ALL, "");
 #endif
 #endif
 
 #ifdef ENABLE_NLS
-   bindtextdomain (PACKAGE, localedir);
-   textdomain (PACKAGE);
+    bindtextdomain(PACKAGE, localedir);
+    textdomain(PACKAGE);
 #endif
 
+    /* variable initialisations */
+    pFlag = (CFlag *)malloc(sizeof(CFlag));
+    if (pFlag == NULL) {
+        D2U_UTF8_FPRINTF(stderr, "dos2unix:");
+        D2U_ANSI_FPRINTF(stderr, " %s\n", strerror(errno));
+        return errno;
+    }
+    pFlag->FromToMode = FROMTO_DOS2UNIX; /* default dos2unix */
+    pFlag->keep_bom = 0;
 
-  /* variable initialisations */
-  pFlag = (CFlag*)malloc(sizeof(CFlag));
-  if (pFlag == NULL) {
-    D2U_UTF8_FPRINTF(stderr, "dos2unix:");
-    D2U_ANSI_FPRINTF(stderr, " %s\n", strerror(errno));
-    return errno;
-  }
-  pFlag->FromToMode = FROMTO_DOS2UNIX;  /* default dos2unix */
-  pFlag->keep_bom = 0;
+    if (((ptr = strrchr(argv[0], '/')) == NULL) && ((ptr = strrchr(argv[0], '\\')) == NULL)) {
+        ptr = argv[0];
+    } else {
+        ptr++;
+    }
 
-  if ( ((ptr=strrchr(argv[0],'/')) == NULL) && ((ptr=strrchr(argv[0],'\\')) == NULL) )
-    ptr = argv[0];
-  else
-    ptr++;
-
-  if ((strcmpi("mac2unix", ptr) == 0) || (strcmpi("mac2unix.exe", ptr) == 0)) {
-    pFlag->FromToMode = FROMTO_MAC2UNIX;
-    d2u_strncpy(progname, "mac2unix", sizeof(progname));
-  }
+    if ((strcmpi("mac2unix", ptr) == 0) || (strcmpi("mac2unix.exe", ptr) == 0)) {
+        pFlag->FromToMode = FROMTO_MAC2UNIX;
+        d2u_strncpy(progname, "mac2unix", sizeof(progname));
+    }
 
 #ifdef D2U_UNIFILE
-  /* Get arguments in wide Unicode format in the Windows Command Prompt */
+    /* Get arguments in wide Unicode format in the Windows Command Prompt */
 
-  /* This does not support wildcard expansion (globbing) */
-  wargv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    /* This does not support wildcard expansion (globbing) */
+    wargv = CommandLineToArgvW(GetCommandLineW(), &argc);
 
-  argv_glob = (char ***)malloc(sizeof(char***));
-  if (argv_glob == NULL) {
-    D2U_UTF8_FPRINTF(stderr, "%s:", progname);
-    D2U_ANSI_FPRINTF(stderr, " %s\n", strerror(errno));
-    free(pFlag);
-    return errno;
-  }
-  /* Glob the arguments and convert them to UTF-8 */
-  argc_new = glob_warg(argc, wargv, argv_glob, pFlag, progname);
-  argv_new = *argv_glob;
-#else  
-  argc_new = argc;
-  argv_new = argv;
+    argv_glob = (char ***)malloc(sizeof(char ***));
+    if (argv_glob == NULL) {
+        D2U_UTF8_FPRINTF(stderr, "%s:", progname);
+        D2U_ANSI_FPRINTF(stderr, " %s\n", strerror(errno));
+        free(pFlag);
+        return errno;
+    }
+    /* Glob the arguments and convert them to UTF-8 */
+    argc_new = glob_warg(argc, wargv, argv_glob, pFlag, progname);
+    argv_new = *argv_glob;
+#else
+    argc_new = argc;
+    argv_new = argv;
 #endif
 
 #ifdef D2U_UNICODE
-  ret = parse_options(argc_new, argv_new, pFlag, localedir, progname, PrintLicense, ConvertDosToUnix, ConvertDosToUnixW);
+    ret = parse_options(argc_new, argv_new, pFlag, localedir, progname, PrintLicense,
+                        ConvertDosToUnix, ConvertDosToUnixW);
 #else
-  ret = parse_options(argc_new, argv_new, pFlag, localedir, progname, PrintLicense, ConvertDosToUnix);
+    ret = parse_options(argc_new, argv_new, pFlag, localedir, progname, PrintLicense,
+                        ConvertDosToUnix);
 #endif
-  free(pFlag);
-  return ret;
+    free(pFlag);
+    return ret;
 }
