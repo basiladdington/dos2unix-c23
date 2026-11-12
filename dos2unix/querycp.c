@@ -4,6 +4,13 @@
 #define _WIN32 1
 #endif
 
+/* Include our own header, after the Watcom _WIN32 fix-up above, so that the
+ * compiler checks every platform specific definition below against the one
+ * shared prototype, and so that the [[nodiscard]] attribute declared there
+ * applies to all of them. See querycp.h for the documentation of the return
+ * value on each platform. */
+#include "querycp.h"
+
 #ifdef __DJGPP__
 
 #include <dpmi.h>
@@ -95,6 +102,13 @@ unsigned short query_con_codepage(void) {
     regs.x.cflag |= 1; /* preset carry for potential failure */
     int86(0x21, &regs, &regs);
 
+    /* AUDIT NOTE (C23 modernization review, code intentionally unchanged,
+     * this branch cannot be built or tested on the Unix development host):
+     * unlike the DJGPP version above, the BX check below is not inside the
+     * fallback branch. When the 440Ch query succeeds, BX still appears to
+     * hold the STDOUT handle (1), which would overwrite the code page DOS
+     * stored in param_block[1]. Callers map values below 2 to CP437. */
+
     if (regs.x.cflag) /* if not succeed (carry flag set) */
     {
         regs.x.ax = 0xAD02; /* 440C -> MS-DOS or DR-DOS only */
@@ -124,9 +138,18 @@ unsigned short query_con_codepage(void) {
     regs.x.eax = 0x440C; /* GENERIC IO FOR HANDLES */
     regs.x.ebx = 1;      /* STDOUT */
     regs.x.ecx = 0x036A; /* 3 = CON, 0x6A = QUERY SELECTED CP */
+    /* AUDIT NOTE (C23 modernization review, code intentionally unchanged,
+     * this branch cannot be built or tested on the Unix development host):
+     * the cast below truncates the 32 bit flat address of param_block to
+     * 16 bits, so DOS is not given a usable pointer to the parameter
+     * block and the 440Ch result cannot be relied upon in this branch. */
     regs.x.edx = (unsigned short)param_block;
     regs.x.cflag |= 1; /* preset carry for potential failure */
     int386(0x21, &regs, &regs);
+
+    /* AUDIT NOTE: same limitation as in the 16 bit Watcom version above.
+     * The EBX check below also runs when the 440Ch query succeeded, with
+     * EBX apparently still holding the STDOUT handle (1). */
 
     if (regs.x.cflag) /* if not succeed (carry flag set) */
     {
@@ -173,16 +196,31 @@ unsigned short query_con_codepage(void) {
     ULONG cp[3];
     ULONG cplen;
 
+    /* AUDIT NOTE (C23 modernization review, code intentionally unchanged,
+     * this branch cannot be built or tested on the Unix development host):
+     * the DosQueryCp() return code is not checked and cp[] is not
+     * initialized. If the call fails, cp[0] is read uninitialized and an
+     * indeterminate code page number is returned. */
     DosQueryCp(sizeof(cp), cp, &cplen);
     return ((unsigned short)cp[0]);
 }
 
 #else /* Unix, other */
-unsigned short query_con_codepage(void) { return (0); }
+/* Unix-like systems (and Cygwin) have no DOS console code page to query.
+ * Return 0 as the "unknown code page" value. The "-iso" option parsing in
+ * common.c maps every value below 2 to CONVMODE_437, so on these systems
+ * "-iso" always selects the CP437 default. */
+unsigned short query_con_codepage(void) { return 0; }
 #endif
 
 #ifdef TEST
-int main() {
+/* Stand-alone test program, build with -DTEST. Only the DOS branches above
+ * include <stdio.h> themselves, so include it here to make the test program
+ * compile on every platform. The explicit (void) parameter list keeps the
+ * definition a prototype for pre-C23 compilers as well. */
+#include <stdio.h>
+
+int main(void) {
     printf("\nCP%u\n", query_con_codepage()); /* should be same result as */
     return 0;                                 /*   "mode con cp /status" */
 }
