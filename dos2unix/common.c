@@ -32,6 +32,9 @@
 #include <fcntl.h>
 #endif
 #include <stdarg.h>
+/* <stdckdint.h> (ISO C23): checked integer arithmetic. ckd_add() is used
+ * where the size of an allocated buffer is computed, see MakeTempFileFrom(). */
+#include <stdckdint.h>
 #include <time.h>
 
 #if !defined(_WIN32) && !defined(__MSDOS__) && !defined(__OS2__) && defined(_POSIX_C_SOURCE) &&    \
@@ -67,6 +70,75 @@
 int d2u_display_encoding = D2U_DISPLAY_ANSI;
 #endif
 
+/*
+ * File-scope constants (ISO C23 constexpr).
+ *
+ * These give a name and a type to numbers that were written out literally
+ * in the code. A constexpr object is a compile time constant: unlike a
+ * '#define' it has a type and a scope, and unlike a 'const' variable it can
+ * be used where a constant expression is required (array sizes, 'case'
+ * labels, static_assert).
+ */
+
+/* Byte order marks (BOM), see read_bom() and write_bom().
+ * The first byte of every BOM is different. read_bom() relies on that to
+ * decide after one byte that a file has no BOM. */
+static constexpr unsigned char BOM_UTF16LE[] = {0xff, 0xfe};
+static constexpr unsigned char BOM_UTF16BE[] = {0xfe, 0xff};
+static constexpr unsigned char BOM_UTF8[] = {0xef, 0xbb, 0xbf};
+static constexpr unsigned char BOM_GB18030[] = {0x84, 0x31, 0x95, 0x33};
+
+/* Length in bytes of the longest BOM (GB18030). */
+static constexpr int BOM_MAX_LEN = 4;
+
+/* Buffer invariant: read_bom() reads at most BOM_MAX_LEN bytes ahead, and
+ * pushes all of them back with d2u_ungetc() when they are not a BOM. The
+ * lookahead buffer of BufferedStream (common.h) must be able to hold them
+ * all. This is checked at compile time, so that changing one of the
+ * constants cannot silently break the BOM detection. */
+static_assert(sizeof(BOM_GB18030) == (size_t)BOM_MAX_LEN,
+              "BOM_MAX_LEN must be the length of the longest BOM");
+static_assert(BOM_MAX_LEN <= MAX_LOOKAHEAD,
+              "the lookahead buffer must hold a complete BOM for read_bom()");
+
+/* ASCII control characters used to detect line breaks and binary files.
+ * A character below D2U_CHAR_SPACE that is not one of the four characters
+ * listed here marks a file as binary, see binaryChar(). The type is int,
+ * like the character values returned by d2u_getc(). */
+static constexpr int D2U_CHAR_TAB = 0x09;
+static constexpr int D2U_CHAR_LF = 0x0a;
+static constexpr int D2U_CHAR_FF = 0x0c;
+static constexpr int D2U_CHAR_CR = 0x0d;
+static constexpr int D2U_CHAR_SPACE = 32;
+
+/* Sizes of the buffers that hold an encoding name for a message, including
+ * the terminating NUL. The names are copied with d2u_strncpy(), which
+ * truncates a longer name and always terminates the buffer. */
+static constexpr size_t D2U_BOM_NAME_SIZE = 64;  /* print_bom(): BOM name */
+static constexpr size_t D2U_INFORMAT_SIZE = 32;  /* print_messages(): input encoding */
+static constexpr size_t D2U_OUTFORMAT_SIZE = 64; /* print_messages(): output encoding */
+
+/* printInfo(): "dos  ", "unix ", "mac  " or "noeol", 5 characters + NUL. */
+static constexpr size_t D2U_EOL_NAME_SIZE = 6;
+
+/* Name template of the temporary output file. It is appended to the
+ * directory of the output file, see MakeTempFileFrom(). The six X's are
+ * replaced by mkstemp(), or by its replacement d2u_mktemp(). */
+static constexpr char D2U_TEMP_TEMPLATE[] = "/d2utmpXXXXXX";
+
+/* The info option with attached flags: "--info=FLAGS" and "-iFLAGS".
+ * The prefix lengths are derived from the strings (sizeof minus the NUL).
+ * This way the length compared by strncmp() and the offset of the flags in
+ * the argument cannot get out of sync with the option text. */
+static constexpr char OPT_INFO_LONG[] = "--info=";
+static constexpr char OPT_INFO_SHORT[] = "-i";
+static constexpr size_t OPT_INFO_LONG_LEN = sizeof(OPT_INFO_LONG) - 1;
+static constexpr size_t OPT_INFO_SHORT_LEN = sizeof(OPT_INFO_SHORT) - 1;
+
+/* Read one character from stream: first the characters that were pushed
+ * back with d2u_ungetc() (the last one pushed back is returned first), then
+ * the file. Returns the character as an int (0..255), or EOF.
+ * [[nodiscard]] in common.h: the result is the data that was read. */
 int d2u_getc(BufferedStream *stream) {
     if (stream->count > 0) {
         return stream->buffer[--stream->count];
@@ -74,6 +146,10 @@ int d2u_getc(BufferedStream *stream) {
     return fgetc(stream->file);
 }
 
+/* Push back character c, so that the next d2u_getc() returns it.
+ * Returns c on success. Returns EOF, and stores nothing, when c is EOF or
+ * when MAX_LOOKAHEAD characters are already pushed back.
+ * [[nodiscard]] in common.h: a failed push back means lost input. */
 int d2u_ungetc(int c, BufferedStream *stream) {
     if (stream->count >= MAX_LOOKAHEAD || c == EOF) {
         return EOF;
@@ -84,6 +160,11 @@ int d2u_ungetc(int c, BufferedStream *stream) {
 
 /* Copy string src to dest, and null terminate dest.
    dest_size must be the buffer size of dest. */
+/* Buffer invariant: dest_size must be at least 1, because
+ * dest[dest_size - 1] is always written. A src that does not fit is
+ * truncated.
+ * Deliberately not [[nodiscard]]: the function cannot fail and returns
+ * dest, like strncpy(), only as a convenience. */
 char *d2u_strncpy(char *dest, const char *src, size_t dest_size) {
     strncpy(dest, src, dest_size);
     dest[dest_size - 1] = '\0';
@@ -98,7 +179,14 @@ char *d2u_strncpy(char *dest, const char *src, size_t dest_size) {
     return dest;
 }
 
-int d2u_fclose(FILE *fp, const char *filename, CFlag *ipFlag, const char *m, const char *progname) {
+/* Close fp. filename is used in the error message only. m is the fopen()
+ * mode of the stream ("r" or "w"), it selects the error message.
+ * Returns 0 on success and EOF on failure. On failure, unless quiet, the
+ * error is printed and errno is stored in ipFlag->error.
+ * [[nodiscard]] (ISO C23): a failed fclose() of an output file means that
+ * data may not have been written, the caller must not ignore it. */
+[[nodiscard]] int d2u_fclose(FILE *fp, const char *filename, CFlag *ipFlag, const char *m,
+                             const char *progname) {
     if (fclose(fp) != 0) {
         if (ipFlag->verbose) {
             ipFlag->error = errno;
@@ -133,9 +221,9 @@ void d2u_PrintLastError(const char *progname) {
 
     dw = GetLastError();
 
-    FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
-                      FORMAT_MESSAGE_IGNORE_INSERTS,
-                  NULL, dw, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPTSTR)&lpMsgBuf, 0, NULL);
+    FormatMessage(
+        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+        nullptr, dw, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPTSTR)&lpMsgBuf, 0, nullptr);
 
     /* Display the error message */
 
@@ -213,7 +301,7 @@ void d2u_utf8_fprintf(FILE *stream, const char *format, ...) {
     UINT outputCP;
     wchar_t wstr[D2U_MAX_PATH];
     int prevmode;
-    static int BOM_printed = 0;
+    static bool BOM_printed = false;
 
     va_start(args, format);
 
@@ -222,7 +310,7 @@ void d2u_utf8_fprintf(FILE *stream, const char *format, ...) {
      * by gettext. Convert it to wide characters. */
     d2u_MultiByteToWideChar(CP_ACP, 0, format, -1, formatwcs, D2U_MAX_PATH);
     /* then convert the format string to UTF-8 */
-    d2u_WideCharToMultiByte(CP_UTF8, 0, formatwcs, -1, formatmbs, D2U_MAX_PATH, NULL, NULL);
+    d2u_WideCharToMultiByte(CP_UTF8, 0, formatwcs, -1, formatmbs, D2U_MAX_PATH, nullptr, nullptr);
 
     /* The arguments (file names) are in UTF-8 encoding, because
      * in dos2unix for Windows all file names are in UTF-8 format.
@@ -247,7 +335,7 @@ void d2u_utf8_fprintf(FILE *stream, const char *format, ...) {
         if (!BOM_printed) {
             if (d2u_display_encoding == D2U_DISPLAY_UTF8BOM)
                 fwprintf(stream, L"%S", "\xEF\xBB\xBF");
-            BOM_printed = 1;
+            BOM_printed = true;
         }
         fwprintf(stream, L"%S", buf);
         fflush(stream);
@@ -271,7 +359,7 @@ void d2u_utf8_fprintf(FILE *stream, const char *format, ...) {
             /* For correct redirection in PowerShell we need to print a BOM */
             if (d2u_display_encoding == D2U_DISPLAY_UNICODEBOM)
                 fwprintf(stream, L"\xfeff");
-            BOM_printed = 1;
+            BOM_printed = true;
         }
         fwprintf(stream, L"%ls", wstr);
         fflush(stream); /* Flushing is required to get correct UTF-16 when stdout is redirected. */
@@ -282,7 +370,7 @@ void d2u_utf8_fprintf(FILE *stream, const char *format, ...) {
         d2u_MultiByteToWideChar(CP_UTF8, 0, buf, -1, wstr, D2U_MAX_PATH);
         /* Convert the whole message to ANSI, some Unicode characters may fail to translate to ANSI.
            They will be displayed as a question mark. */
-        d2u_WideCharToMultiByte(CP_ACP, 0, wstr, -1, buf, D2U_MAX_PATH, NULL, NULL);
+        d2u_WideCharToMultiByte(CP_ACP, 0, wstr, -1, buf, D2U_MAX_PATH, nullptr, nullptr);
         fprintf(stream, "%s", buf);
     }
 
@@ -313,7 +401,7 @@ void d2u_ansi_fprintf(FILE *stream, const char *format, ...) {
      * by gettext. Convert it to wide characters. */
     d2u_MultiByteToWideChar(CP_ACP, 0, buf, -1, bufwcs, D2U_MAX_PATH);
     /* then convert the format string to UTF-8 */
-    d2u_WideCharToMultiByte(CP_UTF8, 0, bufwcs, -1, bufmbs, D2U_MAX_PATH, NULL, NULL);
+    d2u_WideCharToMultiByte(CP_UTF8, 0, bufwcs, -1, bufmbs, D2U_MAX_PATH, nullptr, nullptr);
 
     d2u_utf8_fprintf(stream, "%s", bufmbs);
 
@@ -324,8 +412,11 @@ void d2u_ansi_fprintf(FILE *stream, const char *format, ...) {
 /*   d2u_rename
  *   wrapper for rename().
  *   On Windows file names are encoded in UTF-8.
+ *   Returns 0 on success, not 0 on failure (errno is set), like rename().
+ *   [[nodiscard]] (ISO C23): a failed rename leaves the output in the
+ *   temporary file, the caller must report it.
  */
-int d2u_rename(const char *oldname, const char *newname) {
+[[nodiscard]] int d2u_rename(const char *oldname, const char *newname) {
 #ifdef D2U_UNIFILE
     wchar_t oldnamew[D2U_MAX_PATH];
     wchar_t newnamew[D2U_MAX_PATH];
@@ -340,8 +431,10 @@ int d2u_rename(const char *oldname, const char *newname) {
 /*   d2u_unlink
  *   wrapper for unlink().
  *   On Windows file names are encoded in UTF-8.
+ *   Returns 0 on success, not 0 on failure (errno is set), like unlink().
+ *   [[nodiscard]] (ISO C23): the caller must check if the file is removed.
  */
-int d2u_unlink(const char *filename) {
+[[nodiscard]] int d2u_unlink(const char *filename) {
 #ifdef D2U_UNIFILE
     wchar_t filenamew[D2U_MAX_PATH];
     d2u_MultiByteToWideChar(CP_UTF8, 0, filename, -1, filenamew, D2U_MAX_PATH);
@@ -353,17 +446,19 @@ int d2u_unlink(const char *filename) {
 
 /******************************************************************
  *
- * int symbolic_link(char *path)
+ * bool symbolic_link(const char *path)
  *
  * test if *path points to a file that exists and is a symbolic link
  *
- * returns 1 on success, 0 when it fails.
+ * returns true on success, false when it fails.
+ * (bool since the ISO C23 modernization, it returned int 1 or 0 before.
+ * [[nodiscard]] in common.h: the only effect is the result.)
  *
  ******************************************************************/
 
 #ifdef D2U_UNIFILE
 
-int symbolic_link(const char *path) {
+bool symbolic_link(const char *path) {
     DWORD attrs;
     wchar_t pathw[D2U_MAX_PATH];
 
@@ -371,50 +466,55 @@ int symbolic_link(const char *path) {
     attrs = GetFileAttributesW(pathw);
 
     if (attrs == INVALID_FILE_ATTRIBUTES)
-        return (0);
+        return false;
 
     return ((attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0);
 }
 
 #elif (defined(_WIN32) && !defined(__CYGWIN__))
 
-int symbolic_link(const char *path) {
+bool symbolic_link(const char *path) {
     DWORD attrs;
 
     attrs = GetFileAttributes(path);
 
     if (attrs == INVALID_FILE_ATTRIBUTES)
-        return (0);
+        return false;
 
     return ((attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0);
 }
 
 #else
-int symbolic_link(const char *path) {
+bool symbolic_link(const char *path) {
 #ifdef S_ISLNK
     struct stat buf;
 
     if (STAT(path, &buf) == 0) {
         if (S_ISLNK(buf.st_mode)) {
-            return (1);
+            return true;
         }
     }
 #endif
-    return (0);
+    return false;
 }
 #endif
 
 /******************************************************************
  *
- * int regfile(char *path, int allowSymlinks)
+ * int regfile(char *path, bool allowSymlinks, CFlag *ipFlag,
+ *             const char *progname)
  *
  * test if *path points to a regular file (or is a symbolic link,
- * if allowSymlinks != 0).
+ * if allowSymlinks is true).
  *
  * returns 0 on success, -1 when it fails.
+ * When the file cannot be examined and the program is not quiet, the
+ * error is printed and errno is stored in ipFlag->error.
+ * [[nodiscard]] in common.h (ISO C23): the result decides if the file
+ * is converted or skipped.
  *
  ******************************************************************/
-int regfile(char *path, int allowSymlinks, CFlag *ipFlag, const char *progname) {
+int regfile(char *path, bool allowSymlinks, CFlag *ipFlag, const char *progname) {
 #ifdef D2U_UNIFILE
     struct _stat buf;
     wchar_t pathw[D2U_MAX_PATH];
@@ -479,6 +579,7 @@ int regfile(char *path, int allowSymlinks, CFlag *ipFlag, const char *progname) 
  * test if *path points to a regular file (follow symbolic link)
  *
  * returns 0 on success, -1 when it fails.
+ * [[nodiscard]] in common.h (ISO C23), see regfile().
  *
  ******************************************************************/
 int regfile_target(char *path, CFlag *ipFlag, const char *progname) {
@@ -536,15 +637,23 @@ int glob_warg(int argc, wchar_t *wargv[], char ***argv, CFlag *ipFlag, const cha
     WIN32_FIND_DATA FindFileData;
     HANDLE hFind;
 
+    /* AUDIT NOTE (C23 modernization review). This function is Windows only
+     * code. It cannot be built or tested on the Unix development host, so
+     * apart from the nullptr replacement it is intentionally unchanged.
+     * The allocation sizes in this function are computed without overflow
+     * checks (no <stdckdint.h> ckd_add() or ckd_mul()), and the lengths
+     * returned by d2u_WideCharToMultiByte() are used without a check for
+     * its error value 0. The places are marked "AUDIT NOTE" below. */
     argv_new = (char **)malloc(sizeof(char **));
-    if (argv_new == NULL)
+    if (argv_new == nullptr)
         goto glob_failed;
 
-    len = (size_t)d2u_WideCharToMultiByte(CP_UTF8, 0, wargv[0], -1, NULL, 0, NULL, NULL);
+    /* AUDIT NOTE: len is 0 when the conversion failed; not checked. */
+    len = (size_t)d2u_WideCharToMultiByte(CP_UTF8, 0, wargv[0], -1, nullptr, 0, nullptr, nullptr);
     arg = (char *)malloc(len);
-    if (arg == NULL)
+    if (arg == nullptr)
         goto glob_failed;
-    d2u_WideCharToMultiByte(CP_UTF8, 0, wargv[argc_glob], -1, arg, (int)len, NULL, NULL);
+    d2u_WideCharToMultiByte(CP_UTF8, 0, wargv[argc_glob], -1, arg, (int)len, nullptr, nullptr);
     argv_new[argc_glob] = arg;
 
     for (i = 1; i < argc; ++i) {
@@ -553,13 +662,13 @@ int glob_warg(int argc, wchar_t *wargv[], char ***argv, CFlag *ipFlag, const cha
         add_path = 0;
         /* FindFileData.cFileName has the path stripped off. We need to add it again. */
         path = _wcsdup(warg);
-        if (path == NULL)
+        if (path == nullptr)
             goto glob_failed;
         /* replace all back slashes with slashes */
-        while ((ptr = wcschr(path, L'\\')) != NULL) {
+        while ((ptr = wcschr(path, L'\\')) != nullptr) {
             *ptr = L'/';
         }
-        if ((ptr = wcsrchr(path, L'/')) != NULL) {
+        if ((ptr = wcsrchr(path, L'/')) != nullptr) {
             ptr++;
             *ptr = L'\0';
             add_path = 1;
@@ -568,9 +677,12 @@ int glob_warg(int argc, wchar_t *wargv[], char ***argv, CFlag *ipFlag, const cha
         hFind = FindFirstFileW(warg, &FindFileData);
         while (hFind != INVALID_HANDLE_VALUE) {
             char **new_argv_new;
+            /* AUDIT NOTE: unchecked size arithmetic. Neither this sum nor
+             * the multiplication by sizeof(wchar_t) below is checked for
+             * overflow. */
             len = wcslen(path) + wcslen(FindFileData.cFileName) + 2;
             path_and_filename = (wchar_t *)malloc(len * sizeof(wchar_t));
-            if (path_and_filename == NULL) {
+            if (path_and_filename == nullptr) {
                 free(path);
                 goto glob_failed;
             }
@@ -585,17 +697,21 @@ int glob_warg(int argc, wchar_t *wargv[], char ***argv, CFlag *ipFlag, const cha
 
             found = 1;
             ++argc_glob;
-            len = (size_t)d2u_WideCharToMultiByte(CP_UTF8, 0, path_and_filename, -1, NULL, 0, NULL,
-                                                  NULL);
+            /* AUDIT NOTE: len is 0 when the conversion failed; not checked. */
+            len = (size_t)d2u_WideCharToMultiByte(CP_UTF8, 0, path_and_filename, -1, nullptr, 0,
+                                                  nullptr, nullptr);
             arg = (char *)malloc((size_t)len);
-            if (arg == NULL) {
+            if (arg == nullptr) {
                 free(path);
                 goto glob_failed;
             }
-            d2u_WideCharToMultiByte(CP_UTF8, 0, path_and_filename, -1, arg, (int)len, NULL, NULL);
+            d2u_WideCharToMultiByte(CP_UTF8, 0, path_and_filename, -1, arg, (int)len, nullptr,
+                                    nullptr);
             free(path_and_filename);
+            /* AUDIT NOTE: unchecked size arithmetic, (argc_glob + 1) and the
+             * multiplication are not checked for overflow. */
             new_argv_new = (char **)realloc(argv_new, (size_t)(argc_glob + 1) * sizeof(char **));
-            if (new_argv_new == NULL) {
+            if (new_argv_new == nullptr) {
                 free(path);
                 free(arg);
                 goto glob_failed;
@@ -613,13 +729,16 @@ int glob_warg(int argc, wchar_t *wargv[], char ***argv, CFlag *ipFlag, const cha
             /* Not a file. Just copy the argument */
             char **new_argv_new;
             ++argc_glob;
-            len = (size_t)d2u_WideCharToMultiByte(CP_UTF8, 0, warg, -1, NULL, 0, NULL, NULL);
+            /* AUDIT NOTE: len is 0 when the conversion failed; not checked. */
+            len =
+                (size_t)d2u_WideCharToMultiByte(CP_UTF8, 0, warg, -1, nullptr, 0, nullptr, nullptr);
             arg = (char *)malloc((size_t)len);
-            if (arg == NULL)
+            if (arg == nullptr)
                 goto glob_failed;
-            d2u_WideCharToMultiByte(CP_UTF8, 0, warg, -1, arg, (int)len, NULL, NULL);
+            d2u_WideCharToMultiByte(CP_UTF8, 0, warg, -1, arg, (int)len, nullptr, nullptr);
+            /* AUDIT NOTE: unchecked size arithmetic, see above. */
             new_argv_new = (char **)realloc(argv_new, (size_t)(argc_glob + 1) * sizeof(char **));
-            if (new_argv_new == NULL)
+            if (new_argv_new == nullptr)
                 goto glob_failed;
             else
                 argv_new = new_argv_new;
@@ -672,13 +791,16 @@ IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.\n\
 "));
 }
 
-int is_dos2unix(const char *progname) {
-    if ((strncmp(progname, "dos2unix", sizeof("dos2unix")) == 0) ||
-        (strncmp(progname, "mac2unix", sizeof("mac2unix")) == 0)) {
-        return 1;
-    } else {
-        return 0;
-    }
+/* Returns true when progname is "dos2unix" or "mac2unix", and false for
+ * the other direction ("unix2dos", "unix2mac"). It selects the messages
+ * and the meaning of the option '-c mac'.
+ * bool and [[nodiscard]] (ISO C23): a predicate without side effects, a
+ * call that ignores the result is a mistake. */
+[[nodiscard]] bool is_dos2unix(const char *progname) {
+    /* In C the result of '||' has type int. The cast states the conversion
+     * to the bool return type explicitly. */
+    return (bool)((strncmp(progname, "dos2unix", sizeof("dos2unix")) == 0) ||
+                  (strncmp(progname, "mac2unix", sizeof("mac2unix")) == 0));
 }
 
 void PrintUsage(const char *progname) {
@@ -843,7 +965,7 @@ void PrintVersion(const char *progname, const char *localedir) {
 }
 
 /* opens file of name ipFN in read only mode
- * returns: NULL if failure
+ * returns: nullptr if failure
  *          file stream otherwise
  */
 FILE *OpenInFile(char *ipFN) {
@@ -860,6 +982,9 @@ FILE *OpenInFile(char *ipFN) {
 #if !defined(__MSDOS__) && !defined(_WIN32) && !defined(__OS2__)
 /* Open a regular input file without allowing a pathname replacement to
  * redirect the open to another inode. */
+/* On success *statbuf holds the fstat() data of the opened file. On
+ * failure nullptr is returned and errno is set.
+ * [[nodiscard]] in common.h (ISO C23): the result is an open stream. */
 FILE *OpenInFileNoFollow(const char *ipFN, struct stat *statbuf) {
     struct stat PathStat;
     struct stat FileStat;
@@ -869,11 +994,11 @@ FILE *OpenInFileNoFollow(const char *ipFN, struct stat *statbuf) {
     int open_flags = O_RDONLY | O_NONBLOCK;
 
     if (lstat(ipFN, &PathStat) == -1) {
-        return NULL;
+        return nullptr;
     }
     if (!S_ISREG(PathStat.st_mode)) {
         errno = EINVAL;
-        return NULL;
+        return nullptr;
     }
 
 #ifdef O_NOFOLLOW
@@ -881,7 +1006,7 @@ FILE *OpenInFileNoFollow(const char *ipFN, struct stat *statbuf) {
 #endif
     fd = open(ipFN, open_flags);
     if (fd == -1) {
-        return NULL;
+        return nullptr;
     }
 
     saved_errno = 0;
@@ -895,32 +1020,41 @@ FILE *OpenInFileNoFollow(const char *ipFN, struct stat *statbuf) {
     if (saved_errno != 0) {
         close(fd);
         errno = saved_errno;
-        return NULL;
+        return nullptr;
     }
 
     fp = fdopen(fd, R_CNTRL);
-    if (fp == NULL) {
+    if (fp == nullptr) {
         saved_errno = errno;
         close(fd);
         errno = saved_errno;
-        return NULL;
+        return nullptr;
     }
     *statbuf = FileStat;
     return fp;
 }
 #endif
 
-BufferedStream *d2u_bsopen(FILE *f) {
+/* Wrap the open file f in a newly allocated BufferedStream with an empty
+ * lookahead buffer.
+ * Ownership: on success the stream refers to f; close the file and free
+ * the stream with d2u_bsclose(). When the allocation fails, f is closed
+ * here and nullptr is returned, so the caller must not use or close f
+ * after a failure. This also applies when f is stdin. A null f gives
+ * nullptr.
+ * [[nodiscard]] (ISO C23): the result is an allocated pointer that the
+ * caller has to check and to release. */
+[[nodiscard]] BufferedStream *d2u_bsopen(FILE *f) {
     BufferedStream *stream;
 
     if (!f) {
-        return NULL;
+        return nullptr;
     }
 
     stream = malloc(sizeof(BufferedStream));
     if (!stream) {
         fclose(f);
-        return NULL;
+        return nullptr;
     }
 
     stream->file = f;
@@ -929,8 +1063,13 @@ BufferedStream *d2u_bsopen(FILE *f) {
     return stream;
 }
 
-int d2u_bsclose(BufferedStream *stream, const char *filename, CFlag *ipFlag, const char *m,
-                const char *progname) {
+/* Close the file of stream with d2u_fclose() (see there for filename, m
+ * and the error reporting) and free the stream. A null stream is allowed.
+ * Returns 0 on success. Returns EOF when closing failed, or when stream or
+ * its file is null.
+ * [[nodiscard]] (ISO C23): see d2u_fclose(). */
+[[nodiscard]] int d2u_bsclose(BufferedStream *stream, const char *filename, CFlag *ipFlag,
+                              const char *m, const char *progname) {
     int r = EOF;
     if (stream) {
         if (stream->file) {
@@ -942,7 +1081,7 @@ int d2u_bsclose(BufferedStream *stream, const char *filename, CFlag *ipFlag, con
 }
 
 /* opens file of name opFN in write only mode
- * returns: NULL if failure
+ * returns: nullptr if failure
  *          file stream otherwise
  */
 FILE *OpenOutFile(char *opFN) {
@@ -957,7 +1096,7 @@ FILE *OpenOutFile(char *opFN) {
 }
 
 /* opens file descriptor in write only mode
- * returns: NULL if failure
+ * returns: nullptr if failure
  *          file stream otherwise
  */
 FILE *OpenOutFiled(int fd) { return (fdopen(fd, W_CNTRL)); }
@@ -969,13 +1108,13 @@ char *dirname(char *path) {
     char *ptr;
 
     /* replace all back slashes with slashes */
-    while ((ptr = strchr(path, '\\')) != NULL)
+    while ((ptr = strchr(path, '\\')) != nullptr)
         *ptr = '/';
     /* Code checkers may report that the condition (path == NULL) is redundant.
        E.g. Cppcheck 1.72. The condition (path == NULL) is needed, because
        the behaviour of strrchr is not specified when it get's a NULL string.
        The behaviour may be undefined, dependent on the implementation. */
-    if ((path == NULL) || ((ptr = strrchr(path, '/')) == NULL))
+    if ((path == nullptr) || ((ptr = strrchr(path, '/')) == nullptr))
         return ".";
 
     if (strcmp(path, "/") == 0)
@@ -990,13 +1129,13 @@ char *basename(char *path) {
     char *ptr;
 
     /* replace all back slashes with slashes */
-    while ((ptr = strchr(path, '\\')) != NULL)
+    while ((ptr = strchr(path, '\\')) != nullptr)
         *ptr = '/';
     /* Code checkers may report that the condition (path == NULL) is redundant.
        E.g. Cppcheck 1.72. The condition (path == NULL) is needed, because
        the behaviour of strrchr is not specified when it get's a NULL string.
        The behaviour may be undefined, dependent on the implementation. */
-    if ((path == NULL) || ((ptr = strrchr(path, '/')) == NULL))
+    if ((path == nullptr) || ((ptr = strrchr(path, '/')) == nullptr))
         return path;
 
     if (strcmp(path, "/") == 0)
@@ -1014,8 +1153,10 @@ char *basename(char *path) {
  * On Windows template is not modified, the returned pointer has to
  * be used.
  */
+/* [[nodiscard]] (ISO C23): the result is the name of the temporary file,
+ * or nullptr on failure. On Windows it is newly allocated memory. */
 #ifdef NO_MKSTEMP
-char *d2u_mktemp(char *template) {
+[[nodiscard]] char *d2u_mktemp(char *template) {
 #if defined(_WIN32) && !defined(__CYGWIN__)
 
     unsigned int uRetVal;
@@ -1027,62 +1168,70 @@ char *d2u_mktemp(char *template) {
     wchar_t bnw[MAX_PATH];
     wchar_t szTempFileNamew[MAX_PATH];
     char *fname_str;
-    int error = 0;
+    bool error = false;
 #else
     char szTempFileName[MAX_PATH];
     char *fname_str;
 #endif
-    if ((cpy1 = strdup(template)) == NULL)
-        return NULL;
-    if ((cpy2 = strdup(template)) == NULL) {
+    if ((cpy1 = strdup(template)) == nullptr)
+        return nullptr;
+    if ((cpy2 = strdup(template)) == nullptr) {
         free(cpy1);
-        return NULL;
+        return nullptr;
     }
     dn = dirname(cpy1);
     bn = basename(cpy2);
 #ifdef D2U_UNIFILE /* template is UTF-8 formatted. */
-    if (d2u_MultiByteToWideChar(CP_UTF8, 0, dn, -1, NULL, 0) > (MAX_PATH - 15)) {
+    if (d2u_MultiByteToWideChar(CP_UTF8, 0, dn, -1, nullptr, 0) > (MAX_PATH - 15)) {
         D2U_UTF8_FPRINTF(stderr, "%s: ", "dos2unix");
         D2U_ANSI_FPRINTF(stderr, _("Path for temporary output file is too long:"));
         D2U_UTF8_FPRINTF(stderr, " %s\n", dn);
-        error = 1;
+        error = true;
     }
     if ((!error) && (d2u_MultiByteToWideChar(CP_UTF8, 0, dn, -1, dnw, MAX_PATH) == 0))
-        error = 1;
+        error = true;
     if ((!error) && (d2u_MultiByteToWideChar(CP_UTF8, 0, bn, -1, bnw, MAX_PATH) == 0))
-        error = 1;
+        error = true;
     free(cpy1);
     free(cpy2);
     if (error)
-        return NULL;
+        return nullptr;
     uRetVal = GetTempFileNameW(dnw, bnw, 0, szTempFileNamew);
     if (!uRetVal) {
         d2u_PrintLastError("dos2unix");
-        return NULL;
+        return nullptr;
     }
-    len = (size_t)d2u_WideCharToMultiByte(CP_UTF8, 0, szTempFileNamew, -1, NULL, 0, NULL, NULL);
+    /* AUDIT NOTE (C23 modernization review; Windows only code that cannot be
+     * built or tested on the Unix development host, intentionally
+     * unchanged): len is 0 when the conversion failed; not checked before
+     * malloc(). */
+    len = (size_t)d2u_WideCharToMultiByte(CP_UTF8, 0, szTempFileNamew, -1, nullptr, 0, nullptr,
+                                          nullptr);
     fname_str = (char *)malloc(len);
     if (!fname_str)
-        return NULL;
-    if (d2u_WideCharToMultiByte(CP_UTF8, 0, szTempFileNamew, -1, fname_str, MAX_PATH, NULL, NULL) ==
-        0)
-        return NULL;
+        return nullptr;
+    if (d2u_WideCharToMultiByte(CP_UTF8, 0, szTempFileNamew, -1, fname_str, MAX_PATH, nullptr,
+                                nullptr) == 0)
+        return nullptr;
 #else
     uRetVal = GetTempFileNameA(dn, bn, 0, szTempFileName);
     free(cpy1);
     free(cpy2);
     if (!uRetVal) {
         d2u_PrintLastError("dos2unix");
-        return NULL;
+        return nullptr;
     }
+    /* AUDIT NOTE (C23 modernization review; Windows only, unchanged): no
+     * overflow check is needed here, szTempFileName holds at most MAX_PATH
+     * characters. */
     len = strlen(szTempFileName) + 1;
     fname_str = (char *)malloc(len);
     if (!fname_str)
-        return NULL;
+        return nullptr;
     d2u_strncpy(fname_str, szTempFileName, len);
 #endif
     /* replace all back slashes with slashes */
-    while ((ptr = strchr(fname_str, '\\')) != NULL)
+    while ((ptr = strchr(fname_str, '\\')) != nullptr)
         *ptr = '/';
     return fname_str;
 
@@ -1092,19 +1241,32 @@ char *d2u_mktemp(char *template) {
 }
 #endif
 
+/* Create and open a temporary output file in the directory of OutFN.
+ *
+ * returns: the open stream of the temporary file, *fname_ret is its name
+ *          nullptr if failure, *fname_ret is then nullptr as well
+ *
+ * Ownership: on success *fname_ret is newly allocated memory that the
+ * caller must free(). The file is created in the directory of the output
+ * file, because the caller rename()s it to the output file later, and
+ * rename() cannot move a file to another file system.
+ * errno tells why it failed. ENAMETOOLONG is set when the size of the
+ * name cannot be represented.
+ * [[nodiscard]] in common.h (ISO C23): the result is an open stream. */
 FILE *MakeTempFileFrom(const char *OutFN, char **fname_ret) {
     char *cpy = strdup(OutFN);
-    char *dir = NULL;
+    char *dir = nullptr;
     size_t fname_len = 0;
-    char *fname_str = NULL;
-    FILE *fp = NULL; /* file pointer */
+    int written = 0;
+    char *fname_str = nullptr;
+    FILE *fp = nullptr; /* file pointer */
 #ifdef NO_MKSTEMP
     char *name;
 #else
     int fd = -1; /* file descriptor */
 #endif
 
-    *fname_ret = NULL;
+    *fname_ret = nullptr;
 
     if (!cpy) {
         goto make_failed;
@@ -1112,28 +1274,46 @@ FILE *MakeTempFileFrom(const char *OutFN, char **fname_ret) {
 
     dir = dirname(cpy);
 
-    fname_len = strlen(dir) + strlen("/d2utmpXXXXXX") + sizeof(char);
-    if (!(fname_str = (char *)malloc(fname_len))) {
+    /* Size of the name of the temporary file: the directory, the template
+     * and the terminating NUL (sizeof(D2U_TEMP_TEMPLATE) includes the NUL).
+     * ISO C23 checked arithmetic: ckd_add() returns true when the sum does
+     * not fit in a size_t. Without the check a wrapped around sum would
+     * allocate a buffer that is too small for the name. */
+    if (ckd_add(&fname_len, strlen(dir), sizeof(D2U_TEMP_TEMPLATE))) {
+        errno = ENAMETOOLONG;
         goto make_failed;
     }
-    sprintf(fname_str, "%s%s", dir, "/d2utmpXXXXXX");
+    fname_str = (char *)malloc(fname_len);
+    if (!fname_str) {
+        goto make_failed;
+    }
+    /* From here on the name is reachable through *fname_ret, so that the
+     * make_failed path frees it. */
     *fname_ret = fname_str;
+    /* snprintf() is bounded by the size that was computed above, so the
+     * name always fits. The result is checked nevertheless: a truncated
+     * name must never be used as a file name. */
+    written = snprintf(fname_str, fname_len, "%s%s", dir, D2U_TEMP_TEMPLATE);
+    if ((written < 0) || ((size_t)written >= fname_len)) {
+        errno = ENAMETOOLONG;
+        goto make_failed;
+    }
 
     free(cpy);
-    cpy = NULL;
+    cpy = nullptr;
 
 #ifdef NO_MKSTEMP
-    if ((name = d2u_mktemp(fname_str)) == NULL)
+    if ((name = d2u_mktemp(fname_str)) == nullptr)
         goto make_failed;
     *fname_ret = name;
-    if ((fp = OpenOutFile(name)) == NULL)
+    if ((fp = OpenOutFile(name)) == nullptr)
         goto make_failed;
 #else
     if ((fd = mkstemp(fname_str)) == -1) {
         goto make_failed;
     }
 
-    if ((fp = OpenOutFiled(fd)) == NULL) {
+    if ((fp = OpenOutFiled(fd)) == nullptr) {
         goto make_failed;
     }
 #endif
@@ -1143,11 +1323,11 @@ FILE *MakeTempFileFrom(const char *OutFN, char **fname_ret) {
 make_failed:
     if (cpy) {
         free(cpy);
-        cpy = NULL;
+        cpy = nullptr;
     }
     free(*fname_ret);
-    *fname_ret = NULL;
-    return NULL;
+    *fname_ret = nullptr;
+    return nullptr;
 }
 
 /* Test if *lFN is the name of a symbolic link.  If not, set *rFN equal
@@ -1169,7 +1349,7 @@ int ResolveSymbolicLink(char *lFN, char **rFN, CFlag *ipFlag, const char *progna
 #ifdef S_ISLNK
     struct stat StatBuf;
     const char *errstr;
-    char *targetFN = NULL;
+    char *targetFN = nullptr;
 
     if (STAT(lFN, &StatBuf)) {
         if (ipFlag->verbose) {
@@ -1198,6 +1378,10 @@ int ResolveSymbolicLink(char *lFN, char **rFN, CFlag *ipFlag, const char *progna
         /* Sigh. Use realpath, but realize that it has a fatal
          * flaw: PATH_MAX isn't necessarily the maximum path
          * length -- so realpath() might fail. */
+        /* Buffer invariant: realpath() requires a buffer of at least
+         * PATH_MAX bytes. PATH_MAX * sizeof(char) is a compile time
+         * constant (sizeof(char) is 1) that cannot overflow, so no
+         * <stdckdint.h> check is needed for this allocation size. */
         targetFN = (char *)malloc(PATH_MAX * sizeof(char));
         if (!targetFN) {
             if (ipFlag->verbose) {
@@ -1237,7 +1421,23 @@ int ResolveSymbolicLink(char *lFN, char **rFN, CFlag *ipFlag, const char *progna
 }
 
 /* Read the Byte Order Mark.
-   Returns file pointer or NULL in case of a read error */
+   Returns file pointer or nullptr in case of a read error */
+/* Details and invariants of read_bom():
+ * - *bomtype is always set: to FILE_UTF16LE, FILE_UTF16BE, FILE_UTF8 or
+ *   FILE_GB18030 when the stream starts with that BOM, to FILE_MBS when
+ *   it does not.
+ * - A BOM that is found is consumed. When no BOM is found, every byte
+ *   that was read is pushed back with d2u_ungetc() in reverse order, so
+ *   that the next d2u_getc() returns the first byte of the file again.
+ * - At most BOM_MAX_LEN (4) bytes are read ahead. That is why
+ *   MAX_LOOKAHEAD must be at least 4, see the static_assert at the top of
+ *   this file.
+ * - Returns f on success. Returns nullptr on a read error, or when a push
+ *   back failed; the caller reports it with d2u_getc_error(). A null f is
+ *   returned unchanged.
+ * - [[nodiscard]] in common.h (ISO C23): the result is the only way to
+ *   see a read error.
+ */
 
 BufferedStream *read_bom(BufferedStream *f, int *bomtype) {
     /* BOMs
@@ -1250,80 +1450,83 @@ BufferedStream *read_bom(BufferedStream *f, int *bomtype) {
     *bomtype = FILE_MBS;
 
     /* Check for BOM */
-    if (f != NULL) {
-        int bom[4];
+    if (f != nullptr) {
+        int bom[BOM_MAX_LEN];
         if ((bom[0] = d2u_getc(f)) == EOF) {
             if (ferror(f->file)) {
-                return NULL;
+                return nullptr;
             }
             *bomtype = FILE_MBS;
             return (f);
         }
-        if ((bom[0] != 0xff) && (bom[0] != 0xfe) && (bom[0] != 0xef) && (bom[0] != 0x84)) {
+        if ((bom[0] != BOM_UTF16LE[0]) && (bom[0] != BOM_UTF16BE[0]) && (bom[0] != BOM_UTF8[0]) &&
+            (bom[0] != BOM_GB18030[0])) {
             if (d2u_ungetc(bom[0], f) == EOF) {
-                return NULL;
+                return nullptr;
             }
             *bomtype = FILE_MBS;
             return (f);
         }
         if ((bom[1] = d2u_getc(f)) == EOF) {
             if (ferror(f->file)) {
-                return NULL;
+                return nullptr;
             }
             if (d2u_ungetc(bom[0], f) == EOF) {
-                return NULL;
+                return nullptr;
             }
             *bomtype = FILE_MBS;
             return (f);
         }
-        if ((bom[0] == 0xff) && (bom[1] == 0xfe)) { /* UTF16-LE */
+        if ((bom[0] == BOM_UTF16LE[0]) && (bom[1] == BOM_UTF16LE[1])) { /* UTF16-LE */
             *bomtype = FILE_UTF16LE;
             return (f);
         }
-        if ((bom[0] == 0xfe) && (bom[1] == 0xff)) { /* UTF16-BE */
+        if ((bom[0] == BOM_UTF16BE[0]) && (bom[1] == BOM_UTF16BE[1])) { /* UTF16-BE */
             *bomtype = FILE_UTF16BE;
             return (f);
         }
         if ((bom[2] = d2u_getc(f)) == EOF) {
             if (ferror(f->file)) {
-                return NULL;
+                return nullptr;
             }
             if (d2u_ungetc(bom[1], f) == EOF) {
-                return NULL;
+                return nullptr;
             }
             if (d2u_ungetc(bom[0], f) == EOF) {
-                return NULL;
+                return nullptr;
             }
             *bomtype = FILE_MBS;
             return (f);
         }
-        if ((bom[0] == 0xef) && (bom[1] == 0xbb) && (bom[2] == 0xbf)) { /* UTF-8 */
+        if ((bom[0] == BOM_UTF8[0]) && (bom[1] == BOM_UTF8[1]) &&
+            (bom[2] == BOM_UTF8[2])) { /* UTF-8 */
             *bomtype = FILE_UTF8;
             return (f);
         }
-        if ((bom[0] == 0x84) && (bom[1] == 0x31) && (bom[2] == 0x95)) {
+        if ((bom[0] == BOM_GB18030[0]) && (bom[1] == BOM_GB18030[1]) &&
+            (bom[2] == BOM_GB18030[2])) {
             bom[3] = d2u_getc(f);
             if (ferror(f->file)) {
-                return NULL;
+                return nullptr;
             }
-            if (bom[3] == 0x33) { /* GB18030 */
+            if (bom[3] == BOM_GB18030[3]) { /* GB18030 */
                 *bomtype = FILE_GB18030;
                 return (f);
             }
             if (bom[3] != EOF) {
                 if (d2u_ungetc(bom[3], f) == EOF) {
-                    return NULL;
+                    return nullptr;
                 }
             }
         }
         if (d2u_ungetc(bom[2], f) == EOF) {
-            return NULL;
+            return nullptr;
         }
         if (d2u_ungetc(bom[1], f) == EOF) {
-            return NULL;
+            return nullptr;
         }
         if (d2u_ungetc(bom[0], f) == EOF) {
-            return NULL;
+            return nullptr;
         }
         *bomtype = FILE_MBS;
         return (f);
@@ -1331,6 +1534,20 @@ BufferedStream *read_bom(BufferedStream *f, int *bomtype) {
     return (f);
 }
 
+/* Write a Byte Order Mark to f.
+ * The BOM that is written depends on ipFlag->bomtype (the BOM of the input
+ * file), ipFlag->keep_utf16 and ipFlag->locale_target:
+ * - keep_utf16 is true: the BOM of the input encoding (UTF-16LE, UTF-16BE
+ *   or GB18030), and a UTF-8 BOM in all other cases.
+ * - keep_utf16 is false: a GB18030 BOM when the output is GB18030, a UTF-8
+ *   BOM otherwise.
+ * The bytes are the same as in BOM_UTF16LE, BOM_UTF16BE, BOM_UTF8 and
+ * BOM_GB18030 at the top of this file. They are written out as string
+ * literals here, because they are passed to fprintf("%s"); none of the
+ * BOMs contains a NUL byte.
+ * Returns f on success, nullptr when writing failed.
+ * [[nodiscard]] in common.h (ISO C23): the result is the only way to see
+ * a write error. */
 FILE *write_bom(FILE *f, CFlag *ipFlag, const char *progname) {
     int bomtype = ipFlag->bomtype;
 
@@ -1342,7 +1559,7 @@ FILE *write_bom(FILE *f, CFlag *ipFlag, const char *progname) {
         switch (bomtype) {
         case FILE_UTF16LE: /* UTF-16 Little Endian */
             if (fprintf(f, "%s", "\xFF\xFE") < 0) {
-                return NULL;
+                return nullptr;
             }
             if (ipFlag->verbose > 1) {
                 D2U_UTF8_FPRINTF(stderr, "%s: ", progname);
@@ -1351,7 +1568,7 @@ FILE *write_bom(FILE *f, CFlag *ipFlag, const char *progname) {
             break;
         case FILE_UTF16BE: /* UTF-16 Big Endian */
             if (fprintf(f, "%s", "\xFE\xFF") < 0) {
-                return NULL;
+                return nullptr;
             }
             if (ipFlag->verbose > 1) {
                 D2U_UTF8_FPRINTF(stderr, "%s: ", progname);
@@ -1360,7 +1577,7 @@ FILE *write_bom(FILE *f, CFlag *ipFlag, const char *progname) {
             break;
         case FILE_GB18030: /* GB18030 */
             if (fprintf(f, "%s", "\x84\x31\x95\x33") < 0) {
-                return NULL;
+                return nullptr;
             }
             if (ipFlag->verbose > 1) {
                 D2U_UTF8_FPRINTF(stderr, "%s: ", progname);
@@ -1369,7 +1586,7 @@ FILE *write_bom(FILE *f, CFlag *ipFlag, const char *progname) {
             break;
         default: /* UTF-8 */
             if (fprintf(f, "%s", "\xEF\xBB\xBF") < 0) {
-                return NULL;
+                return nullptr;
             }
             if (ipFlag->verbose > 1) {
                 D2U_UTF8_FPRINTF(stderr, "%s: ", progname);
@@ -1381,7 +1598,7 @@ FILE *write_bom(FILE *f, CFlag *ipFlag, const char *progname) {
             (((bomtype == FILE_UTF16LE) || (bomtype == FILE_UTF16BE)) &&
              (ipFlag->locale_target == TARGET_GB18030))) {
             if (fprintf(f, "%s", "\x84\x31\x95\x33") < 0) {
-                return NULL; /* GB18030 */
+                return nullptr; /* GB18030 */
             }
             if (ipFlag->verbose > 1) {
                 D2U_UTF8_FPRINTF(stderr, "%s: ", progname);
@@ -1389,7 +1606,7 @@ FILE *write_bom(FILE *f, CFlag *ipFlag, const char *progname) {
             }
         } else {
             if (fprintf(f, "%s", "\xEF\xBB\xBF") < 0) {
-                return NULL; /* UTF-8 */
+                return nullptr; /* UTF-8 */
             }
             if (ipFlag->verbose > 1) {
                 D2U_UTF8_FPRINTF(stderr, "%s: ", progname);
@@ -1401,7 +1618,7 @@ FILE *write_bom(FILE *f, CFlag *ipFlag, const char *progname) {
 }
 
 void print_bom(const int bomtype, const char *filename, const char *progname) {
-    char informat[64];
+    char informat[D2U_BOM_NAME_SIZE];
 
     switch (bomtype) {
     case FILE_UTF16LE: /* UTF-16 Little Endian */
@@ -1421,7 +1638,7 @@ void print_bom(const int bomtype, const char *filename, const char *progname) {
 
     if (bomtype > 0) {
 #ifdef D2U_UNIFILE
-        wchar_t informatw[64];
+        wchar_t informatw[D2U_BOM_NAME_SIZE];
 #endif
         informat[sizeof(informat) - 1] = '\0';
 
@@ -1432,7 +1649,8 @@ void print_bom(const int bomtype, const char *filename, const char *progname) {
          * by gettext. Convert it to wide characters. */
         d2u_MultiByteToWideChar(CP_ACP, 0, informat, -1, informatw, sizeof(informat));
         /* then convert the format string to UTF-8 */
-        d2u_WideCharToMultiByte(CP_UTF8, 0, informatw, -1, informat, sizeof(informat), NULL, NULL);
+        d2u_WideCharToMultiByte(CP_UTF8, 0, informatw, -1, informat, sizeof(informat), nullptr,
+                                nullptr);
 #endif
 
         D2U_UTF8_FPRINTF(stderr, "%s: ", progname);
@@ -1467,10 +1685,12 @@ void print_bom_info(const int bomtype) {
  * Set ipFlag->bomtype to assumed BOM type, when file's BOM == FILE_MBS.
  * Return -1 when a read error occurred, or when whar_t < 32 bit on non-Windows OS.
  * Return 0 when everything is OK.
+ * [[nodiscard]] (ISO C23): the caller must stop processing the file when
+ * -1 is returned.
  */
 
-int check_unicode_info(BufferedStream *InF, CFlag *ipFlag, const char *progname,
-                       int *bomtype_orig) {
+[[nodiscard]] int check_unicode_info(BufferedStream *InF, CFlag *ipFlag, const char *progname,
+                                     int *bomtype_orig) {
 #ifdef D2U_UNICODE
     if (ipFlag->verbose > 1) {
         if (ipFlag->ConvMode == CONVMODE_UTF16LE) {
@@ -1483,7 +1703,7 @@ int check_unicode_info(BufferedStream *InF, CFlag *ipFlag, const char *progname,
         }
     }
 #endif
-    if ((InF = read_bom(InF, &ipFlag->bomtype)) == NULL) {
+    if ((InF = read_bom(InF, &ipFlag->bomtype)) == nullptr) {
         d2u_getc_error(ipFlag, progname);
         return -1;
     }
@@ -1514,6 +1734,17 @@ int check_unicode_info(BufferedStream *InF, CFlag *ipFlag, const char *progname,
     return 0;
 }
 
+/* check_unicode()
+ * Print the assumed encoding and read the BOM of InF into ipFlag->bomtype.
+ * Set ipFlag->bomtype to the assumed UTF-16 type when the file has no BOM
+ * and the option -ul or -ub is given. Write a BOM to TempF when a BOM is
+ * requested (add_bom, or keep_bom and the input file has a BOM).
+ * Return -1 when a read or write error occurred, when UTF-16 is not
+ * supported by this build, or when wchar_t < 32 bit on a non-Windows OS.
+ * Return 0 when everything is OK.
+ * [[nodiscard]] in common.h (ISO C23): the caller must stop processing
+ * the file when -1 is returned.
+ */
 int check_unicode(BufferedStream *InF, FILE *TempF, CFlag *ipFlag, const char *ipInFN,
                   const char *progname) {
 
@@ -1529,7 +1760,7 @@ int check_unicode(BufferedStream *InF, FILE *TempF, CFlag *ipFlag, const char *i
         }
     }
 #endif
-    if ((InF = read_bom(InF, &ipFlag->bomtype)) == NULL) {
+    if ((InF = read_bom(InF, &ipFlag->bomtype)) == nullptr) {
         d2u_getc_error(ipFlag, progname);
         return -1;
     }
@@ -1575,10 +1806,11 @@ int check_unicode(BufferedStream *InF, FILE *TempF, CFlag *ipFlag, const char *i
 #endif
 #endif
 
-    if ((ipFlag->add_bom) || ((ipFlag->keep_bom) && (ipFlag->bomtype > 0))) {
-        if (write_bom(TempF, ipFlag, progname) == NULL) {
-            return -1;
-        }
+    /* write_bom() is only called when a BOM is requested: '&&' does not
+     * evaluate its right operand when the left operand is false. */
+    if (((ipFlag->add_bom) || ((ipFlag->keep_bom) && (ipFlag->bomtype > 0))) &&
+        (write_bom(TempF, ipFlag, progname) == nullptr)) {
+        return -1;
     }
 
     return 0;
@@ -1588,6 +1820,10 @@ int check_unicode(BufferedStream *InF, FILE *TempF, CFlag *ipFlag, const char *i
  * returns: 0 if success
  *         -1 otherwise
  */
+/* When -1 is returned the reason is in ipFlag->status (a skipped file) or
+ * in ipFlag->error (a real error). ipFlag->status is reset at the start.
+ * [[nodiscard]] in common.h (ISO C23): the result tells if the file was
+ * converted. */
 int ConvertNewFile(char *ipInFN, char *ipOutFN, CFlag *ipFlag, const char *progname,
                    int (*Convert)(BufferedStream *, FILE *, CFlag *, const char *)
 #ifdef D2U_UNICODE
@@ -1596,9 +1832,9 @@ int ConvertNewFile(char *ipInFN, char *ipOutFN, CFlag *ipFlag, const char *progn
 #endif
 ) {
     int RetVal = 0;
-    FILE *InF = NULL;
-    BufferedStream *InB = NULL;
-    FILE *TempF = NULL;
+    FILE *InF = nullptr;
+    BufferedStream *InB = nullptr;
+    FILE *TempF = nullptr;
     char *TempPath;
     const char *errstr;
 #ifdef D2U_UNIFILE
@@ -1612,7 +1848,7 @@ int ConvertNewFile(char *ipInFN, char *ipOutFN, CFlag *ipFlag, const char *progn
 #ifndef NO_CHMOD
     mode_t mask;
 #endif
-    char *TargetFN = NULL;
+    char *TargetFN = nullptr;
     int ResolveSymlinkResult = 0;
 
     ipFlag->status = 0;
@@ -1625,7 +1861,7 @@ int ConvertNewFile(char *ipInFN, char *ipOutFN, CFlag *ipFlag, const char *progn
     }
 
     /* Test if input file is a regular file or symbolic link */
-    if (regfile(ipInFN, 1, ipFlag, progname)) {
+    if (regfile(ipInFN, true, ipFlag, progname)) {
         ipFlag->status |= NO_REGFILE;
         /* Not a failure, skipping non-regular input file according spec. */
         return -1;
@@ -1653,7 +1889,7 @@ int ConvertNewFile(char *ipInFN, char *ipOutFN, CFlag *ipFlag, const char *progn
        default old-file mode.  The pathname is also the output name in this
        mode, so following a replacement symlink would disclose another file. */
 #if !defined(__MSDOS__) && !defined(_WIN32) && !defined(__OS2__)
-    if ((ipFlag->NewFile == 0) && (ipFlag->Follow == SYMLINK_SKIP)) {
+    if ((!ipFlag->NewFile) && (ipFlag->Follow == SYMLINK_SKIP)) {
         InF = OpenInFileNoFollow(ipInFN, &StatBuf);
     } else {
         if (stat(ipInFN, &StatBuf) == 0) {
@@ -1670,7 +1906,7 @@ int ConvertNewFile(char *ipInFN, char *ipOutFN, CFlag *ipFlag, const char *progn
         InF = OpenInFile(ipInFN);
 #endif
 
-    if (InF == NULL) {
+    if (InF == nullptr) {
         if (ipFlag->verbose) {
             ipFlag->error = errno;
             errstr = strerror(errno);
@@ -1681,7 +1917,7 @@ int ConvertNewFile(char *ipInFN, char *ipOutFN, CFlag *ipFlag, const char *progn
     }
 
     InB = d2u_bsopen(InF);
-    if (InB == NULL) {
+    if (InB == nullptr) {
         if (ipFlag->verbose) {
             ipFlag->error = errno;
             errstr = strerror(errno);
@@ -1713,7 +1949,7 @@ int ConvertNewFile(char *ipInFN, char *ipOutFN, CFlag *ipFlag, const char *progn
      */
 
     /* can open temp output file? */
-    if ((TempF = MakeTempFileFrom(TargetFN, &TempPath)) == NULL) {
+    if ((TempF = MakeTempFileFrom(TargetFN, &TempPath)) == nullptr) {
         if (ipFlag->verbose) {
             if (errno) {
                 ipFlag->error = errno;
@@ -1731,7 +1967,7 @@ int ConvertNewFile(char *ipInFN, char *ipOutFN, CFlag *ipFlag, const char *progn
     }
 
 #if DEBUG
-    if (TempPath != NULL) {
+    if (TempPath != nullptr) {
         D2U_UTF8_FPRINTF(stderr, "%s: ", progname);
         D2U_UTF8_FPRINTF(stderr, _("using %s as temporary file\n"), TempPath);
     }
@@ -1795,7 +2031,7 @@ int ConvertNewFile(char *ipInFN, char *ipOutFN, CFlag *ipFlag, const char *progn
 
 #ifndef NO_CHMOD
     if (!RetVal) {
-        if (ipFlag->NewFile == 0) {                   /* old-file mode */
+        if (!ipFlag->NewFile) {                       /* old-file mode */
             RetVal = fchmod(TempFd, StatBuf.st_mode); /* set original permissions */
         } else {
             mask = umask(0); /* get process's umask */
@@ -1819,7 +2055,7 @@ int ConvertNewFile(char *ipInFN, char *ipOutFN, CFlag *ipFlag, const char *progn
 #endif
 
 #ifndef NO_CHOWN
-    if (!RetVal && (ipFlag->NewFile == 0)) { /* old-file mode */
+    if (!RetVal && (!ipFlag->NewFile)) { /* old-file mode */
         /* Change owner and group of the temporary output file to the original file's uid and gid.
          */
         /* Required when a different user (e.g. root) has write permission on the original file. */
@@ -1910,7 +2146,7 @@ int ConvertNewFile(char *ipInFN, char *ipOutFN, CFlag *ipFlag, const char *progn
     }
 
     /* any error? cleanup the temp file */
-    if (RetVal && (TempPath != NULL)) {
+    if (RetVal && (TempPath != nullptr)) {
         if (d2u_unlink(TempPath) && (errno != ENOENT)) {
             if (ipFlag->verbose) {
                 ipFlag->error = errno;
@@ -1967,22 +2203,26 @@ int ConvertNewFile(char *ipInFN, char *ipOutFN, CFlag *ipFlag, const char *progn
  * returns: 0 if success
  *         -1 otherwise
  */
-int ConvertToStdout(char *ipInFN, CFlag *ipFlag, const char *progname,
-                    int (*Convert)(BufferedStream *, FILE *, CFlag *, const char *)
+/* In this function the output is written to stdout (option -O), there is
+ * no ipOutFN. When -1 is returned the reason is in ipFlag->status or
+ * ipFlag->error.
+ * [[nodiscard]] (ISO C23): the result tells if the file was converted. */
+[[nodiscard]] int ConvertToStdout(char *ipInFN, CFlag *ipFlag, const char *progname,
+                                  int (*Convert)(BufferedStream *, FILE *, CFlag *, const char *)
 #ifdef D2U_UNICODE
-                        ,
-                    int (*ConvertW)(BufferedStream *, FILE *, CFlag *, const char *)
+                                      ,
+                                  int (*ConvertW)(BufferedStream *, FILE *, CFlag *, const char *)
 #endif
 ) {
     int RetVal = 0;
-    FILE *InF = NULL;
-    BufferedStream *InB = NULL;
+    FILE *InF = nullptr;
+    BufferedStream *InB = nullptr;
     const char *errstr;
 
     ipFlag->status = 0;
 
     /* Test if input file is a regular file or symbolic link */
-    if (regfile(ipInFN, 1, ipFlag, progname)) {
+    if (regfile(ipInFN, true, ipFlag, progname)) {
         ipFlag->status |= NO_REGFILE;
         /* Not a failure, skipping non-regular input file according spec. */
         return -1;
@@ -1997,7 +2237,7 @@ int ConvertToStdout(char *ipInFN, CFlag *ipFlag, const char *progname,
 
     /* can open in file? */
     InF = OpenInFile(ipInFN);
-    if (InF == NULL) {
+    if (InF == nullptr) {
         if (ipFlag->verbose) {
             ipFlag->error = errno;
             errstr = strerror(errno);
@@ -2007,7 +2247,7 @@ int ConvertToStdout(char *ipInFN, CFlag *ipFlag, const char *progname,
         return -1;
     }
     InB = d2u_bsopen(InF);
-    if (InB == NULL) {
+    if (InB == nullptr) {
         if (ipFlag->verbose) {
             ipFlag->error = errno;
             errstr = strerror(errno);
@@ -2072,6 +2312,9 @@ int ConvertToStdout(char *ipInFN, CFlag *ipFlag, const char *progname,
  * returns: 0 if success
  *         -1 otherwise
  */
+/* Errors are also recorded in ipFlag->error and ipFlag->status; that is
+ * what parse_options() uses.
+ * [[nodiscard]] in common.h (ISO C23): the result is an error code. */
 int ConvertStdio(CFlag *ipFlag, const char *progname,
                  int (*Convert)(BufferedStream *, FILE *, CFlag *, const char *)
 #ifdef D2U_UNICODE
@@ -2079,11 +2322,11 @@ int ConvertStdio(CFlag *ipFlag, const char *progname,
                  int (*ConvertW)(BufferedStream *, FILE *, CFlag *, const char *)
 #endif
 ) {
-    BufferedStream *InB = NULL;
+    BufferedStream *InB = nullptr;
     const char *errstr;
     int RetVal;
-    ipFlag->NewFile = 1;
-    ipFlag->KeepDate = 0;
+    ipFlag->NewFile = true;
+    ipFlag->KeepDate = false;
 
 #if defined(_WIN32) && !defined(__CYGWIN__)
 
@@ -2103,7 +2346,7 @@ int ConvertStdio(CFlag *ipFlag, const char *progname,
 #endif
 
     InB = d2u_bsopen(stdin);
-    if (InB == NULL) {
+    if (InB == nullptr) {
         if (ipFlag->verbose) {
             ipFlag->error = errno;
             errstr = strerror(errno);
@@ -2199,11 +2442,11 @@ void print_format(const CFlag *pFlag, char *informat, char *outformat, size_t li
 
 void print_messages(const CFlag *pFlag, const char *infile, const char *outfile,
                     const char *progname, const int conversion_error) {
-    char informat[32];
-    char outformat[64];
+    char informat[D2U_INFORMAT_SIZE];
+    char outformat[D2U_OUTFORMAT_SIZE];
 #ifdef D2U_UNIFILE
-    wchar_t informatw[32];
-    wchar_t outformatw[64];
+    wchar_t informatw[D2U_INFORMAT_SIZE];
+    wchar_t outformatw[D2U_OUTFORMAT_SIZE];
 #endif
 
     print_format(pFlag, informat, outformat, sizeof(informat), sizeof(outformat));
@@ -2216,8 +2459,10 @@ void print_messages(const CFlag *pFlag, const char *infile, const char *outfile,
     d2u_MultiByteToWideChar(CP_ACP, 0, informat, -1, informatw, sizeof(informat));
     d2u_MultiByteToWideChar(CP_ACP, 0, outformat, -1, outformatw, sizeof(outformat));
     /* then convert the format string to UTF-8 */
-    d2u_WideCharToMultiByte(CP_UTF8, 0, informatw, -1, informat, sizeof(informat), NULL, NULL);
-    d2u_WideCharToMultiByte(CP_UTF8, 0, outformatw, -1, outformat, sizeof(outformat), NULL, NULL);
+    d2u_WideCharToMultiByte(CP_UTF8, 0, informatw, -1, informat, sizeof(informat), nullptr,
+                            nullptr);
+    d2u_WideCharToMultiByte(CP_UTF8, 0, outformatw, -1, outformat, sizeof(outformat), nullptr,
+                            nullptr);
 #endif
 
     if (pFlag->status & NO_REGFILE) {
@@ -2368,21 +2613,22 @@ void print_messages_info(const CFlag *pFlag, const char *infile, const char *pro
                 stderr, _("Skipping symbolic link %s, target is not a regular file.\n"), infile);
         }
 #ifdef D2U_UNICODE
-    } else if (pFlag->status & WCHAR_T_TOO_SMALL) {
-        if (pFlag->verbose) {
-            D2U_UTF8_FPRINTF(stderr, "%s: ", progname);
-            D2U_UTF8_FPRINTF(stderr,
-                             _("Skipping UTF-16 file %s, the size of wchar_t is %d bytes.\n"),
-                             infile, (int)sizeof(wchar_t));
-        }
+    } else if ((pFlag->status & WCHAR_T_TOO_SMALL) && pFlag->verbose) {
+        D2U_UTF8_FPRINTF(stderr, "%s: ", progname);
+        D2U_UTF8_FPRINTF(stderr, _("Skipping UTF-16 file %s, the size of wchar_t is %d bytes.\n"),
+                         infile, (int)sizeof(wchar_t));
 #endif
     }
 }
 
+/* Print one line of file information (option -i).
+ * last_eol is the type of the last line break of the file: INFO_DOS,
+ * INFO_UNIX or INFO_MAC, or 0 when the last line has no line break. It is
+ * uint32_t, like the INFO_* constants it is compared with. */
 void printInfo(CFlag *ipFlag, const char *filename, int bomtype, unsigned int lb_dos,
-               unsigned int lb_unix, unsigned int lb_mac, int last_eol) {
-    static int header_done = 0;
-    char eol[6];
+               unsigned int lb_unix, unsigned int lb_mac, uint32_t last_eol) {
+    static bool header_done = false;
+    char eol[D2U_EOL_NAME_SIZE];
 
     if (ipFlag->file_info & INFO_CONVERT) {
         if ((ipFlag->FromToMode == FROMTO_DOS2UNIX) && (lb_dos == 0) &&
@@ -2401,7 +2647,7 @@ void printInfo(CFlag *ipFlag, const char *filename, int bomtype, unsigned int lb
             (!ipFlag->add_eol || last_eol == INFO_UNIX)) {
             return;
         }
-        if ((ipFlag->Force == 0) && (ipFlag->status & BINARY_FILE)) {
+        if ((!ipFlag->Force) && (ipFlag->status & BINARY_FILE)) {
             return;
         }
     }
@@ -2437,7 +2683,7 @@ void printInfo(CFlag *ipFlag, const char *filename, int bomtype, unsigned int lb
         } else {
             D2U_UTF8_FPRINTF(stdout, "\n");
         }
-        header_done = 1;
+        header_done = true;
     }
 
     switch (last_eol) {
@@ -2478,8 +2724,8 @@ void printInfo(CFlag *ipFlag, const char *filename, int bomtype, unsigned int lb
     }
     if (*filename != '\0') {
         const char *ptr;
-        if ((ipFlag->file_info & INFO_NOPATH) && (((ptr = strrchr(filename, '/')) != NULL) ||
-                                                  ((ptr = strrchr(filename, '\\')) != NULL))) {
+        if ((ipFlag->file_info & INFO_NOPATH) && (((ptr = strrchr(filename, '/')) != nullptr) ||
+                                                  ((ptr = strrchr(filename, '\\')) != nullptr))) {
             ptr++;
         } else {
             ptr = filename;
@@ -2504,20 +2750,20 @@ void FileInfoW(BufferedStream *ipInF, CFlag *ipFlag, const char *filename, int b
     unsigned int lb_dos = 0;
     unsigned int lb_unix = 0;
     unsigned int lb_mac = 0;
-    int last_eol = 0;
+    uint32_t last_eol = 0;
 
     ipFlag->status = 0;
 
     while ((TempChar = d2u_getwc(ipInF, ipFlag->bomtype)) != WEOF) {
-        if ((TempChar < 32) && (TempChar != 0x0a) && /* Not an LF */
-            (TempChar != 0x0d) &&                    /* Not a CR */
-            (TempChar != 0x09) &&                    /* Not a TAB */
-            (TempChar != 0x0c)) {                    /* Not a form feed */
+        if ((TempChar < D2U_CHAR_SPACE) && (TempChar != D2U_CHAR_LF) && /* Not an LF */
+            (TempChar != D2U_CHAR_CR) &&                                /* Not a CR */
+            (TempChar != D2U_CHAR_TAB) &&                               /* Not a TAB */
+            (TempChar != D2U_CHAR_FF)) {                                /* Not a form feed */
             ipFlag->status |= BINARY_FILE;
         }
-        if (TempChar != 0x0a) { /* Not an LF */
+        if (TempChar != D2U_CHAR_LF) { /* Not an LF */
             PreviousChar = TempChar;
-            if (TempChar == 0x0d) { /* CR */
+            if (TempChar == D2U_CHAR_CR) { /* CR */
                 lb_mac++;
                 last_eol = INFO_MAC;
             } else {
@@ -2525,7 +2771,7 @@ void FileInfoW(BufferedStream *ipInF, CFlag *ipFlag, const char *filename, int b
             }
         } else {
             /* TempChar is an LF */
-            if (PreviousChar == 0x0d) { /* CR,LF pair. */
+            if (PreviousChar == D2U_CHAR_CR) { /* CR,LF pair. */
                 lb_dos++;
                 lb_mac--;
                 last_eol = INFO_DOS;
@@ -2559,20 +2805,20 @@ void FileInfo(BufferedStream *ipInF, CFlag *ipFlag, const char *filename, int bo
     unsigned int lb_dos = 0;
     unsigned int lb_unix = 0;
     unsigned int lb_mac = 0;
-    int last_eol = 0;
+    uint32_t last_eol = 0;
 
     ipFlag->status = 0;
 
     while ((TempChar = d2u_getc(ipInF)) != EOF) {
-        if ((TempChar < 32) && (TempChar != '\x0a') && /* Not an LF */
-            (TempChar != '\x0d') &&                    /* Not a CR */
-            (TempChar != '\x09') &&                    /* Not a TAB */
-            (TempChar != '\x0c')) {                    /* Not a form feed */
+        if ((TempChar < D2U_CHAR_SPACE) && (TempChar != D2U_CHAR_LF) && /* Not an LF */
+            (TempChar != D2U_CHAR_CR) &&                                /* Not a CR */
+            (TempChar != D2U_CHAR_TAB) &&                               /* Not a TAB */
+            (TempChar != D2U_CHAR_FF)) {                                /* Not a form feed */
             ipFlag->status |= BINARY_FILE;
         }
-        if (TempChar != '\x0a') { /* Not an LF */
+        if (TempChar != D2U_CHAR_LF) { /* Not an LF */
             PreviousChar = TempChar;
-            if (TempChar == '\x0d') { /* CR */
+            if (TempChar == D2U_CHAR_CR) { /* CR */
                 lb_mac++;
                 last_eol = INFO_MAC;
             } else {
@@ -2580,7 +2826,7 @@ void FileInfo(BufferedStream *ipInF, CFlag *ipFlag, const char *filename, int bo
             }
         } else {
             /* TempChar is an LF */
-            if (PreviousChar == '\x0d') { /* CR,LF pair. */
+            if (PreviousChar == D2U_CHAR_CR) { /* CR,LF pair. */
                 lb_dos++;
                 lb_mac--;
                 last_eol = INFO_DOS;
@@ -2606,16 +2852,21 @@ void FileInfo(BufferedStream *ipInF, CFlag *ipFlag, const char *filename, int bo
     printInfo(ipFlag, filename, bomtype, lb_dos, lb_unix, lb_mac, last_eol);
 }
 
-int GetFileInfo(char *ipInFN, CFlag *ipFlag, const char *progname) {
-    FILE *InF = NULL;
-    BufferedStream *InB = NULL;
+/* Print the file information (option -i) of file ipInFN.
+ * returns: 0 if success
+ *         -1 otherwise; the reason is in ipFlag->status (a skipped file)
+ *            or in ipFlag->error (a real error)
+ * [[nodiscard]] (ISO C23): the result is an error code. */
+[[nodiscard]] int GetFileInfo(char *ipInFN, CFlag *ipFlag, const char *progname) {
+    FILE *InF = nullptr;
+    BufferedStream *InB = nullptr;
     int bomtype_orig = FILE_MBS; /* messages must print the real bomtype, not the assumed bomtype */
     const char *errstr;
 
     ipFlag->status = 0;
 
     /* Test if input file is a regular file or symbolic link */
-    if (regfile(ipInFN, 1, ipFlag, progname)) {
+    if (regfile(ipInFN, true, ipFlag, progname)) {
         ipFlag->status |= NO_REGFILE;
         /* Not a failure, skipping non-regular input file according spec. */
         return -1;
@@ -2630,7 +2881,7 @@ int GetFileInfo(char *ipInFN, CFlag *ipFlag, const char *progname) {
 
     /* can open in file? */
     InF = OpenInFile(ipInFN);
-    if (InF == NULL) {
+    if (InF == nullptr) {
         if (ipFlag->verbose) {
             errstr = strerror(errno);
             ipFlag->error = errno;
@@ -2640,7 +2891,7 @@ int GetFileInfo(char *ipInFN, CFlag *ipFlag, const char *progname) {
         return -1;
     }
     InB = d2u_bsopen(InF);
-    if (InB == NULL) {
+    if (InB == nullptr) {
         if (ipFlag->verbose) {
             ipFlag->error = errno;
             errstr = strerror(errno);
@@ -2651,7 +2902,12 @@ int GetFileInfo(char *ipInFN, CFlag *ipFlag, const char *progname) {
     }
 
     if (check_unicode_info(InB, ipFlag, progname, &bomtype_orig)) {
-        d2u_bsclose(InB, ipInFN, ipFlag, "r", progname);
+        /* The result is ignored on purpose, hence the (void) cast for the
+         * [[nodiscard]] function. This is already the error path: -1 is
+         * returned below, and ipFlag->error or ipFlag->status has been set
+         * by check_unicode_info(). A failure to close is still reported,
+         * d2u_fclose() prints it and stores errno in ipFlag->error. */
+        (void)d2u_bsclose(InB, ipInFN, ipFlag, "r", progname);
         return -1;
     }
 
@@ -2674,8 +2930,12 @@ int GetFileInfo(char *ipInFN, CFlag *ipFlag, const char *progname) {
     return 0;
 }
 
-int GetFileInfoStdio(CFlag *ipFlag, const char *progname) {
-    BufferedStream *InB = NULL;
+/* Print the file information (option -i) of stdin.
+ * returns: 0 if success
+ *         -1 otherwise; the reason is in ipFlag->status or ipFlag->error
+ * [[nodiscard]] (ISO C23): the result is an error code. */
+[[nodiscard]] int GetFileInfoStdio(CFlag *ipFlag, const char *progname) {
+    BufferedStream *InB = nullptr;
     int bomtype_orig = FILE_MBS; /* messages must print the real bomtype, not the assumed bomtype */
     const char *errstr;
 
@@ -2697,7 +2957,7 @@ int GetFileInfoStdio(CFlag *ipFlag, const char *progname) {
 #endif
 
     InB = d2u_bsopen(stdin);
-    if (InB == NULL) {
+    if (InB == nullptr) {
         if (ipFlag->verbose) {
             ipFlag->error = errno;
             errstr = strerror(errno);
@@ -2728,7 +2988,7 @@ int GetFileInfoStdio(CFlag *ipFlag, const char *progname) {
 
 void get_info_options(char *option, CFlag *pFlag, const char *progname) {
     char *ptr;
-    int default_info = 1;
+    bool default_info = true;
 
     ptr = option;
 
@@ -2744,31 +3004,31 @@ void get_info_options(char *option, CFlag *pFlag, const char *progname) {
             break;
         case 'd': /* Print nr of DOS line breaks. */
             pFlag->file_info |= INFO_DOS;
-            default_info = 0;
+            default_info = false;
             break;
         case 'u': /* Print nr of Unix line breaks. */
             pFlag->file_info |= INFO_UNIX;
-            default_info = 0;
+            default_info = false;
             break;
         case 'm': /* Print nr of Mac line breaks. */
             pFlag->file_info |= INFO_MAC;
-            default_info = 0;
+            default_info = false;
             break;
         case 'b': /* Print BOM. */
             pFlag->file_info |= INFO_BOM;
-            default_info = 0;
+            default_info = false;
             break;
         case 't': /* Text or binary. */
             pFlag->file_info |= INFO_TEXT;
-            default_info = 0;
+            default_info = false;
             break;
         case 'e': /* Print EOL of last line. */
             pFlag->file_info |= INFO_EOL;
-            default_info = 0;
+            default_info = false;
             break;
         case 'c': /* Print only files that would be converted. */
             pFlag->file_info |= INFO_CONVERT;
-            default_info = 0;
+            default_info = false;
             break;
         case 'h': /* Print a header. */
             pFlag->file_info |= INFO_HEADER;
@@ -2791,6 +3051,14 @@ void get_info_options(char *option, CFlag *pFlag, const char *progname) {
     }
 }
 
+/* Parse the command line. Every file argument is converted (or its file
+ * information is printed) as soon as it is parsed, with the options that
+ * were given before it. Without a file argument stdin is converted to
+ * stdout.
+ * Returns pFlag->error: 0 when no error occurred, otherwise 1 or an errno
+ * value.
+ * [[nodiscard]] in common.h (ISO C23): the result is the error status of
+ * the whole run. */
 int parse_options(int argc, char *argv[], CFlag *pFlag, const char *localedir, const char *progname,
                   void (*PrintLicense)(void),
                   int (*Convert)(BufferedStream *, FILE *, CFlag *, const char *)
@@ -2800,36 +3068,36 @@ int parse_options(int argc, char *argv[], CFlag *pFlag, const char *localedir, c
 #endif
 ) {
     int ArgIdx = 0;
-    int ShouldExit = 0;
-    int CanSwitchFileMode = 1;
-    int process_options = 1;
+    bool ShouldExit = false;
+    bool CanSwitchFileMode = true;
+    bool process_options = true;
 #ifdef D2U_UNIFILE
     char *ptr;
 #endif
 
     /* variable initialisations */
-    pFlag->NewFile = 0;
+    pFlag->NewFile = false;
     pFlag->verbose = 1;
-    pFlag->KeepDate = 0;
+    pFlag->KeepDate = false;
     pFlag->ConvMode = CONVMODE_ASCII; /* default ascii */
-    pFlag->NewLine = 0;
-    pFlag->Force = 0;
-    pFlag->error_binary = 0;
+    pFlag->NewLine = false;
+    pFlag->Force = false;
+    pFlag->error_binary = false;
     pFlag->Follow = SYMLINK_SKIP;
     pFlag->status = 0;
-    pFlag->stdio_mode = 1;
-    pFlag->to_stdout = 0;
+    pFlag->stdio_mode = true;
+    pFlag->to_stdout = false;
     pFlag->error = 0;
     pFlag->bomtype = FILE_MBS;
-    pFlag->add_bom = 0;
-    pFlag->keep_utf16 = 0;
+    pFlag->add_bom = false;
+    pFlag->keep_utf16 = false;
     pFlag->file_info = 0;
     pFlag->locale_target = TARGET_UTF8;
-    pFlag->add_eol = 0;
+    pFlag->add_eol = false;
 
 #ifdef D2U_UNIFILE
     ptr = getenv("DOS2UNIX_DISPLAY_ENC");
-    if (ptr != NULL) {
+    if (ptr != nullptr) {
         if (strncmp(ptr, "ansi", sizeof("ansi")) == 0)
             d2u_display_encoding = D2U_DISPLAY_ANSI;
         else if (strncmp(ptr, "unicode", sizeof("unicode")) == 0)
@@ -2849,7 +3117,7 @@ int parse_options(int argc, char *argv[], CFlag *pFlag, const char *localedir, c
             /* an option */
             if (strcmp(argv[ArgIdx], "--") == 0) {
                 {
-                    process_options = 0;
+                    process_options = false;
                 }
             } else if ((strcmp(argv[ArgIdx], "-h") == 0) || (strcmp(argv[ArgIdx], "--help") == 0)) {
                 PrintUsage(progname);
@@ -2857,35 +3125,35 @@ int parse_options(int argc, char *argv[], CFlag *pFlag, const char *localedir, c
             } else if ((strcmp(argv[ArgIdx], "-b") == 0) ||
                        (strcmp(argv[ArgIdx], "--keep-bom") == 0)) {
                 {
-                    pFlag->keep_bom = 1;
+                    pFlag->keep_bom = true;
                 }
             } else if ((strcmp(argv[ArgIdx], "-k") == 0) ||
                        (strcmp(argv[ArgIdx], "--keepdate") == 0)) {
                 {
-                    pFlag->KeepDate = 1;
+                    pFlag->KeepDate = true;
                 }
             } else if ((strcmp(argv[ArgIdx], "-e") == 0) ||
                        (strcmp(argv[ArgIdx], "--add-eol") == 0)) {
                 {
-                    pFlag->add_eol = 1;
+                    pFlag->add_eol = true;
                 }
             } else if (strcmp(argv[ArgIdx], "--no-add-eol") == 0) {
                 {
-                    pFlag->add_eol = 0;
+                    pFlag->add_eol = false;
                 }
             } else if ((strcmp(argv[ArgIdx], "-f") == 0) ||
                        (strcmp(argv[ArgIdx], "--force") == 0)) {
                 {
-                    pFlag->Force = 1;
+                    pFlag->Force = true;
 #ifndef NO_CHOWN
                 }
             } else if (strcmp(argv[ArgIdx], "--allow-chown") == 0) {
                 {
-                    pFlag->AllowChown = 1;
+                    pFlag->AllowChown = true;
                 }
             } else if (strcmp(argv[ArgIdx], "--no-allow-chown") == 0) {
                 {
-                    pFlag->AllowChown = 0;
+                    pFlag->AllowChown = false;
 #endif
 #ifdef D2U_UNICODE
 #if (defined(_WIN32) && !defined(__CYGWIN__))
@@ -2897,15 +3165,15 @@ int parse_options(int argc, char *argv[], CFlag *pFlag, const char *localedir, c
                 }
             } else if ((strcmp(argv[ArgIdx], "-s") == 0) || (strcmp(argv[ArgIdx], "--safe") == 0)) {
                 {
-                    pFlag->Force = 0;
+                    pFlag->Force = false;
                 }
             } else if ((strcmp(argv[ArgIdx], "--error-binary") == 0)) {
                 {
-                    pFlag->error_binary = 1;
+                    pFlag->error_binary = true;
                 }
             } else if ((strcmp(argv[ArgIdx], "--no-error-binary") == 0)) {
                 {
-                    pFlag->error_binary = 0;
+                    pFlag->error_binary = false;
                 }
             } else if ((strcmp(argv[ArgIdx], "-q") == 0) ||
                        (strcmp(argv[ArgIdx], "--quiet") == 0)) {
@@ -2920,17 +3188,17 @@ int parse_options(int argc, char *argv[], CFlag *pFlag, const char *localedir, c
             } else if ((strcmp(argv[ArgIdx], "-l") == 0) ||
                        (strcmp(argv[ArgIdx], "--newline") == 0)) {
                 {
-                    pFlag->NewLine = 1;
+                    pFlag->NewLine = true;
                 }
             } else if ((strcmp(argv[ArgIdx], "-m") == 0) ||
                        (strcmp(argv[ArgIdx], "--add-bom") == 0)) {
                 {
-                    pFlag->add_bom = 1;
+                    pFlag->add_bom = true;
                 }
             } else if ((strcmp(argv[ArgIdx], "-r") == 0) ||
                        (strcmp(argv[ArgIdx], "--remove-bom") == 0)) {
-                pFlag->keep_bom = 0;
-                pFlag->add_bom = 0;
+                pFlag->keep_bom = false;
+                pFlag->add_bom = false;
             } else if ((strcmp(argv[ArgIdx], "-S") == 0) ||
                        (strcmp(argv[ArgIdx], "--skip-symlink") == 0)) {
                 {
@@ -2956,7 +3224,7 @@ int parse_options(int argc, char *argv[], CFlag *pFlag, const char *localedir, c
                 return (pFlag->error);
             } else if (strcmp(argv[ArgIdx], "-ascii") == 0) { /* SunOS compatible options */
                 pFlag->ConvMode = CONVMODE_ASCII;
-                pFlag->keep_utf16 = 0;
+                pFlag->keep_utf16 = false;
                 pFlag->locale_target = TARGET_UTF8;
             } else if (strcmp(argv[ArgIdx], "-7") == 0) {
                 {
@@ -2999,7 +3267,7 @@ int parse_options(int argc, char *argv[], CFlag *pFlag, const char *localedir, c
             } else if ((strcmp(argv[ArgIdx], "-u") == 0) ||
                        (strcmp(argv[ArgIdx], "--keep-utf16") == 0)) {
                 {
-                    pFlag->keep_utf16 = 1;
+                    pFlag->keep_utf16 = true;
                 }
             } else if ((strcmp(argv[ArgIdx], "-ul") == 0) ||
                        (strcmp(argv[ArgIdx], "--assume-utf16le") == 0)) {
@@ -3016,16 +3284,16 @@ int parse_options(int argc, char *argv[], CFlag *pFlag, const char *localedir, c
                 {
                     pFlag->file_info |= INFO_DEFAULT;
                 }
-            } else if (strncmp(argv[ArgIdx], "--info=", (size_t)7) == 0) {
-                get_info_options(argv[ArgIdx] + 7, pFlag, progname);
-            } else if (strncmp(argv[ArgIdx], "-i", (size_t)2) == 0) {
-                get_info_options(argv[ArgIdx] + 2, pFlag, progname);
+            } else if (strncmp(argv[ArgIdx], OPT_INFO_LONG, OPT_INFO_LONG_LEN) == 0) {
+                get_info_options(argv[ArgIdx] + OPT_INFO_LONG_LEN, pFlag, progname);
+            } else if (strncmp(argv[ArgIdx], OPT_INFO_SHORT, OPT_INFO_SHORT_LEN) == 0) {
+                get_info_options(argv[ArgIdx] + OPT_INFO_SHORT_LEN, pFlag, progname);
             } else if ((strcmp(argv[ArgIdx], "-c") == 0) ||
                        (strcmp(argv[ArgIdx], "--convmode") == 0)) {
                 if (++ArgIdx < argc) {
                     if (strcmpi(argv[ArgIdx], "ascii") == 0) { /* Benjamin Lin's legacy options */
                         pFlag->ConvMode = CONVMODE_ASCII;
-                        pFlag->keep_utf16 = 0;
+                        pFlag->keep_utf16 = false;
                     } else if (strcmpi(argv[ArgIdx], "7bit") == 0) {
                         {
                             pFlag->ConvMode = CONVMODE_7BIT;
@@ -3050,16 +3318,16 @@ int parse_options(int argc, char *argv[], CFlag *pFlag, const char *localedir, c
                         D2U_UTF8_FPRINTF(stderr, _("invalid %s conversion mode specified\n"),
                                          argv[ArgIdx]);
                         pFlag->error = 1;
-                        ShouldExit = 1;
-                        pFlag->stdio_mode = 0;
+                        ShouldExit = true;
+                        pFlag->stdio_mode = false;
                     }
                 } else {
                     ArgIdx--;
                     D2U_UTF8_FPRINTF(stderr, "%s: ", progname);
                     D2U_UTF8_FPRINTF(stderr, _("option '%s' requires an argument\n"), argv[ArgIdx]);
                     pFlag->error = 1;
-                    ShouldExit = 1;
-                    pFlag->stdio_mode = 0;
+                    ShouldExit = true;
+                    pFlag->stdio_mode = false;
                 }
             }
 
@@ -3082,16 +3350,16 @@ int parse_options(int argc, char *argv[], CFlag *pFlag, const char *localedir, c
                         D2U_UTF8_FPRINTF(stderr, _("invalid %s display encoding specified\n"),
                                          argv[ArgIdx]);
                         pFlag->error = 1;
-                        ShouldExit = 1;
-                        pFlag->stdio_mode = 0;
+                        ShouldExit = true;
+                        pFlag->stdio_mode = false;
                     }
                 } else {
                     ArgIdx--;
                     D2U_UTF8_FPRINTF(stderr, "%s: ", progname);
                     D2U_UTF8_FPRINTF(stderr, _("option '%s' requires an argument\n"), argv[ArgIdx]);
                     pFlag->error = 1;
-                    ShouldExit = 1;
-                    pFlag->stdio_mode = 0;
+                    ShouldExit = true;
+                    pFlag->stdio_mode = false;
                 }
             }
 #endif
@@ -3105,12 +3373,12 @@ int parse_options(int argc, char *argv[], CFlag *pFlag, const char *localedir, c
                                      _("target of file %s not specified in new-file mode\n"),
                                      argv[ArgIdx - 1]);
                     pFlag->error = 1;
-                    ShouldExit = 1;
-                    pFlag->stdio_mode = 0;
+                    ShouldExit = true;
+                    pFlag->stdio_mode = false;
                 }
-                pFlag->NewFile = 0;
+                pFlag->NewFile = false;
                 pFlag->file_info = 0;
-                pFlag->to_stdout = 0;
+                pFlag->to_stdout = false;
             }
 
             else if ((strcmp(argv[ArgIdx], "-n") == 0) ||
@@ -3122,10 +3390,10 @@ int parse_options(int argc, char *argv[], CFlag *pFlag, const char *localedir, c
                                      _("target of file %s not specified in new-file mode\n"),
                                      argv[ArgIdx - 1]);
                     pFlag->error = 1;
-                    ShouldExit = 1;
-                    pFlag->stdio_mode = 0;
+                    ShouldExit = true;
+                    pFlag->stdio_mode = false;
                 }
-                pFlag->NewFile = 1;
+                pFlag->NewFile = true;
                 pFlag->file_info = 0;
             } else if ((strcmp(argv[ArgIdx], "-O") == 0) ||
                        (strcmp(argv[ArgIdx], "--to-stdout") == 0)) {
@@ -3136,25 +3404,25 @@ int parse_options(int argc, char *argv[], CFlag *pFlag, const char *localedir, c
                                      _("target of file %s not specified in new-file mode\n"),
                                      argv[ArgIdx - 1]);
                     pFlag->error = 1;
-                    ShouldExit = 1;
-                    pFlag->stdio_mode = 0;
+                    ShouldExit = true;
+                    pFlag->stdio_mode = false;
                 }
-                pFlag->NewFile = 0;
-                pFlag->to_stdout = 1;
+                pFlag->NewFile = false;
+                pFlag->to_stdout = true;
             } else { /* wrong option */
                 PrintUsage(progname);
-                ShouldExit = 1;
+                ShouldExit = true;
                 pFlag->error = 1;
-                pFlag->stdio_mode = 0;
+                pFlag->stdio_mode = false;
             }
         } else {
             /* not an option */
             int conversion_error;
-            pFlag->stdio_mode = 0;
+            pFlag->stdio_mode = false;
             if (pFlag->NewFile) {
                 if (CanSwitchFileMode) {
                     {
-                        CanSwitchFileMode = 0;
+                        CanSwitchFileMode = false;
                     }
                 } else {
 #ifdef D2U_UNICODE
@@ -3168,7 +3436,7 @@ int parse_options(int argc, char *argv[], CFlag *pFlag, const char *localedir, c
                         print_messages(pFlag, argv[ArgIdx - 1], argv[ArgIdx], progname,
                                        conversion_error);
                     }
-                    CanSwitchFileMode = 1;
+                    CanSwitchFileMode = true;
                 }
             } else {
                 if (pFlag->file_info) {
@@ -3193,7 +3461,7 @@ int parse_options(int argc, char *argv[], CFlag *pFlag, const char *localedir, c
 #endif
                     }
                     if (pFlag->verbose) {
-                        print_messages(pFlag, argv[ArgIdx], NULL, progname, conversion_error);
+                        print_messages(pFlag, argv[ArgIdx], nullptr, progname, conversion_error);
                     }
                 }
             }
@@ -3202,14 +3470,20 @@ int parse_options(int argc, char *argv[], CFlag *pFlag, const char *localedir, c
 
     /* no file argument, use stdin and stdout */
     if ((argc > 0) && pFlag->stdio_mode) {
+        /* The results of GetFileInfoStdio() and ConvertStdio() are ignored on
+         * purpose, hence the (void) casts for these [[nodiscard]] functions.
+         * Nothing is lost: an error is recorded in pFlag->error, which is
+         * returned below as the result of parse_options(), and the reason
+         * for a skipped input is recorded in pFlag->status, which is printed
+         * by print_messages_info() and print_messages_stdio(). */
         if (pFlag->file_info) {
-            GetFileInfoStdio(pFlag, progname);
+            (void)GetFileInfoStdio(pFlag, progname);
             print_messages_info(pFlag, "stdin", progname);
         } else {
 #ifdef D2U_UNICODE
-            ConvertStdio(pFlag, progname, Convert, ConvertW);
+            (void)ConvertStdio(pFlag, progname, Convert, ConvertW);
 #else
-            ConvertStdio(pFlag, progname, Convert);
+            (void)ConvertStdio(pFlag, progname, Convert);
 #endif
             if (pFlag->verbose) {
                 print_messages_stdio(pFlag, progname);
@@ -3251,6 +3525,40 @@ void d2u_putwc_error(CFlag *ipFlag, const char *progname) {
     }
 }
 
+/* UTF-16 code unit layout and surrogate ranges (ISO C23 constexpr).
+ *
+ * The masks are uint32_t and the bit counts are unsigned, so that all bit
+ * operations in d2u_getwc() and d2u_putwc() are done on unsigned operands.
+ * Shifting and masking a signed int is not portable for all values.
+ * The surrogate range limits are int, like the literals they replace: they
+ * are compared with wint_t and with wchar_t values, and wchar_t is signed
+ * on some systems and unsigned on others.
+ * A lead (high) surrogate is in SURROGATE_LEAD_MIN .. SURROGATE_TRAIL_MIN - 1,
+ * a trail (low) surrogate is in SURROGATE_TRAIL_MIN .. SURROGATE_END - 1. */
+static constexpr unsigned int UTF16_BYTE_BITS = 8;
+static constexpr uint32_t UTF16_LOW_BYTE_MASK = 0x00ff;
+static constexpr uint32_t UTF16_HIGH_BYTE_MASK = 0xff00;
+static constexpr int SURROGATE_LEAD_MIN = 0xd800;
+static constexpr int SURROGATE_TRAIL_MIN = 0xdc00;
+static constexpr int SURROGATE_END = 0xe000;
+/* Each surrogate of a pair carries 10 bits of the code point. */
+static constexpr uint32_t SURROGATE_PAYLOAD_MASK = 0x03ff;
+static constexpr unsigned int SURROGATE_PAYLOAD_BITS = 10;
+/* First code point that is encoded as a surrogate pair. */
+static constexpr uint32_t SUPPLEMENTARY_BASE = 0x10000;
+/* Value of d2u_putwc_lead when no lead surrogate is pending. Any value
+ * outside the lead surrogate range will do. */
+static constexpr wchar_t PUTWC_LEAD_NONE = 0x01;
+/* Size of the multi-byte output buffer of d2u_putwc(), see there. */
+static constexpr size_t PUTWC_MBS_SIZE = 8;
+
+/* Read one UTF-16 code unit (two bytes) from f. bomtype selects the byte
+ * order: FILE_UTF16LE is little endian, every other value is read as big
+ * endian.
+ * Returns the code unit (0..0xFFFF). Returns WEOF at the end of the file
+ * or on a read error, also when only one byte is left.
+ * [[nodiscard]] in common.h (ISO C23): the result is the data that was
+ * read. */
 wint_t d2u_getwc(BufferedStream *f, int bomtype) {
     int c_trail, c_lead;
     wint_t wc;
@@ -3259,22 +3567,23 @@ wint_t d2u_getwc(BufferedStream *f, int bomtype) {
         return (WEOF);
     }
 
+    /* Both values are in the range 0..255 here, because EOF was handled
+     * above. The conversion to unsigned does not change them, and the shift
+     * is done on an unsigned operand. */
     if (bomtype == FILE_UTF16LE) { /* UTF16 little endian */
-        c_trail <<= 8;
-        wc = (wint_t)(c_trail + c_lead);
+        wc = (wint_t)(((uint32_t)c_trail << UTF16_BYTE_BITS) + (uint32_t)c_lead);
     } else { /* UTF16 big endian */
-        c_lead <<= 8;
-        wc = (wint_t)(c_trail + c_lead);
+        wc = (wint_t)(((uint32_t)c_lead << UTF16_BYTE_BITS) + (uint32_t)c_trail);
     }
     return (wc);
 }
 
 /* File-scope surrogate lead state, resettable between files. */
-static wchar_t d2u_putwc_lead = 0x01;
+static wchar_t d2u_putwc_lead = PUTWC_LEAD_NONE;
 
 /* check for lead without a trail at the end of the file. */
 void d2u_check_surrogate_state(CFlag *ipFlag, const char *progname) {
-    if ((d2u_putwc_lead >= 0xd800) && (d2u_putwc_lead < 0xdc00)) {
+    if ((d2u_putwc_lead >= SURROGATE_LEAD_MIN) && (d2u_putwc_lead < SURROGATE_TRAIL_MIN)) {
         if (ipFlag->verbose) {
             D2U_UTF8_FPRINTF(stderr, "%s: ", progname);
             D2U_UTF8_FPRINTF(stderr, _("error: Invalid surrogate pair. Missing low surrogate.\n"));
@@ -3282,12 +3591,33 @@ void d2u_check_surrogate_state(CFlag *ipFlag, const char *progname) {
         ipFlag->status |= UNICODE_CONVERSION_ERROR;
     }
     /* Reset lead for next file. */
-    d2u_putwc_lead = 0x01;
+    d2u_putwc_lead = PUTWC_LEAD_NONE;
 }
 
 /* Put wide character */
+/* Details and invariants of d2u_putwc():
+ * - keep_utf16 is true: wc is written unchanged as two bytes, in the byte
+ *   order of ipFlag->bomtype.
+ * - keep_utf16 is false: wc is converted to the locale encoding (Unix) or
+ *   to UTF-8 or GB18030 (Windows) and the resulting bytes are written.
+ * - Surrogate state: a lead (high) surrogate is not written, but
+ *   remembered in d2u_putwc_lead until its trail (low) surrogate arrives.
+ *   Then the pair is written as one character. PUTWC_LEAD_NONE means that
+ *   no lead is pending. A lead without a trail, or a trail without a
+ *   lead, sets UNICODE_CONVERSION_ERROR in ipFlag->status. At the end of
+ *   every file d2u_check_surrogate_state() must be called, to detect a
+ *   pending lead and to reset the state for the next file.
+ * - Buffer invariant: mbs[] receives the multi-byte form of one
+ *   character. The conversion is bounded by sizeof(mbs), so it cannot
+ *   overflow. PUTWC_MBS_SIZE (8) is enough for the longest UTF-8 or
+ *   GB18030 sequence (4 bytes) and a terminating NUL.
+ * - Returns wc on success. Returns WEOF on a write error or a conversion
+ *   error.
+ * - [[nodiscard]] in common.h (ISO C23): the result is the only way to
+ *   see the error.
+ */
 wint_t d2u_putwc(wint_t wc, FILE *f, CFlag *ipFlag, const char *progname) {
-    static char mbs[8];
+    static char mbs[PUTWC_MBS_SIZE];
 
     static wchar_t wstr[3];
     size_t len;
@@ -3298,13 +3628,11 @@ wint_t d2u_putwc(wint_t wc, FILE *f, CFlag *ipFlag, const char *progname) {
     if (ipFlag->keep_utf16) {
         int c_trail, c_lead;
         if (ipFlag->bomtype == FILE_UTF16LE) { /* UTF16 little endian */
-            c_trail = (int)(wc & 0xff00);
-            c_trail >>= 8;
-            c_lead = (int)(wc & 0xff);
+            c_trail = (int)((wc & UTF16_HIGH_BYTE_MASK) >> UTF16_BYTE_BITS);
+            c_lead = (int)(wc & UTF16_LOW_BYTE_MASK);
         } else { /* UTF16 big endian */
-            c_lead = (int)(wc & 0xff00);
-            c_lead >>= 8;
-            c_trail = (int)(wc & 0xff);
+            c_lead = (int)((wc & UTF16_HIGH_BYTE_MASK) >> UTF16_BYTE_BITS);
+            c_trail = (int)(wc & UTF16_LOW_BYTE_MASK);
         }
         if ((fputc(c_lead, f) == EOF) || (fputc(c_trail, f) == EOF)) {
             return (WEOF);
@@ -3315,8 +3643,8 @@ wint_t d2u_putwc(wint_t wc, FILE *f, CFlag *ipFlag, const char *progname) {
     /* Note: In the new Unicode standard lead is named "high", and trail is name "low". */
 
     /* check for lead without a trail */
-    if ((d2u_putwc_lead >= 0xd800) && (d2u_putwc_lead < 0xdc00) &&
-        ((wc < 0xdc00) || (wc >= 0xe000))) {
+    if ((d2u_putwc_lead >= SURROGATE_LEAD_MIN) && (d2u_putwc_lead < SURROGATE_TRAIL_MIN) &&
+        ((wc < SURROGATE_TRAIL_MIN) || (wc >= SURROGATE_END))) {
         if (ipFlag->verbose) {
             D2U_UTF8_FPRINTF(stderr, "%s: ", progname);
             D2U_UTF8_FPRINTF(stderr, _("error: Invalid surrogate pair. Missing low surrogate.\n"));
@@ -3325,16 +3653,16 @@ wint_t d2u_putwc(wint_t wc, FILE *f, CFlag *ipFlag, const char *progname) {
         return (WEOF);
     }
 
-    if ((wc >= 0xd800) && (wc < 0xdc00)) { /* Surrogate lead */
+    if ((wc >= SURROGATE_LEAD_MIN) && (wc < SURROGATE_TRAIL_MIN)) { /* Surrogate lead */
         /* fprintf(stderr, "UTF-16 lead %x\n",wc); */
         d2u_putwc_lead = (wchar_t)wc; /* lead (high) surrogate */
         return (wc);
     }
-    if ((wc >= 0xdc00) && (wc < 0xe000)) { /* Surrogate trail */
+    if ((wc >= SURROGATE_TRAIL_MIN) && (wc < SURROGATE_END)) { /* Surrogate trail */
         static wchar_t trail;
 
         /* check for trail without a lead */
-        if ((d2u_putwc_lead < 0xd800) || (d2u_putwc_lead >= 0xdc00)) {
+        if ((d2u_putwc_lead < SURROGATE_LEAD_MIN) || (d2u_putwc_lead >= SURROGATE_TRAIL_MIN)) {
             if (ipFlag->verbose) {
                 D2U_UTF8_FPRINTF(stderr, "%s: ", progname);
                 D2U_UTF8_FPRINTF(stderr,
@@ -3352,7 +3680,7 @@ wint_t d2u_putwc(wint_t wc, FILE *f, CFlag *ipFlag, const char *progname) {
         wstr[0] = d2u_putwc_lead;
         wstr[1] = trail;
         wstr[2] = L'\0';
-        d2u_putwc_lead = 0x01; /* make lead invalid */
+        d2u_putwc_lead = PUTWC_LEAD_NONE; /* make lead invalid */
 #else
         /* On Unix wchar_t is 32 bit */
         /* When we don't decode the UTF-16 surrogate pair, wcstombs() does not
@@ -3375,12 +3703,18 @@ wint_t d2u_putwc(wint_t wc, FILE *f, CFlag *ipFlag, const char *progname) {
          * On Cygwin 1.7 wcstombs() produces correct UTF-8 from UTF-16 surrogate pairs.
          */
         /* Decode UTF-16 surrogate pair */
-        wstr[0] = 0x10000;
-        wstr[0] += (d2u_putwc_lead & 0x03FF) << 10;
-        wstr[0] += (trail & 0x03FF);
+        /* The code point is computed in unsigned 32 bit arithmetic. The lead
+         * and the trail were range checked above, so each one contributes
+         * exactly its 10 payload bits. The result is in the range 0x10000 ..
+         * 0x10FFFF, which fits in the 32 bit wchar_t of this branch. */
+        const uint32_t code_point =
+            SUPPLEMENTARY_BASE +
+            (((uint32_t)d2u_putwc_lead & SURROGATE_PAYLOAD_MASK) << SURROGATE_PAYLOAD_BITS) +
+            ((uint32_t)trail & SURROGATE_PAYLOAD_MASK);
+        wstr[0] = (wchar_t)code_point;
         wstr[1] = L'\0';
-        d2u_putwc_lead = 0x01; /* make lead invalid */
-                               /* fprintf(stderr, "UTF-32  %x\n",wstr[0]); */
+        d2u_putwc_lead = PUTWC_LEAD_NONE; /* make lead invalid */
+                                          /* fprintf(stderr, "UTF-32  %x\n",wstr[0]); */
 #endif
     } else {
         wstr[0] = (wchar_t)wc;
@@ -3404,12 +3738,13 @@ wint_t d2u_putwc(wint_t wc, FILE *f, CFlag *ipFlag, const char *progname) {
 #endif
     /* On Windows we convert UTF-16 always to UTF-8 or GB18030 */
     if (ipFlag->locale_target == TARGET_GB18030) {
-        len = (size_t)(WideCharToMultiByte(54936, dwFlags, wstr, -1, mbs, sizeof(mbs), NULL, NULL) -
+        len = (size_t)(WideCharToMultiByte(54936, dwFlags, wstr, -1, mbs, sizeof(mbs), nullptr,
+                                           nullptr) -
                        1);
     } else {
-        len =
-            (size_t)(WideCharToMultiByte(CP_UTF8, dwFlags, wstr, -1, mbs, sizeof(mbs), NULL, NULL) -
-                     1);
+        len = (size_t)(WideCharToMultiByte(CP_UTF8, dwFlags, wstr, -1, mbs, sizeof(mbs), nullptr,
+                                           nullptr) -
+                       1);
     }
 #else
     /* On Unix we convert UTF-16 to the locale encoding */
@@ -3459,23 +3794,25 @@ void logBinaryCharW(CFlag *ipFlag, wint_t c, unsigned int line_nr, const char *p
         if (ipFlag->stdio_mode) {
             ipFlag->error = 1;
         } else {
-            ipFlag->error = ipFlag->error_binary;
+            /* ipFlag->error is an int status and error_binary is a bool:
+             * the error status becomes 1 when a binary file is an error. */
+            ipFlag->error = ipFlag->error_binary ? 1 : 0;
         }
     }
     D2U_UTF8_FPRINTF(stderr, "%s: ", progname);
     D2U_UTF8_FPRINTF(stderr, _("Binary symbol 0x00%02X found at line %u\n"), c, line_nr);
 }
 
-/* Return 1 when c is a binary character */
-int binaryCharW(wint_t c) {
-    if ((c < 32) && (c != 0x0a) && /* Not an LF */
-        (c != 0x0d) &&             /* Not a CR */
-        (c != 0x09) &&             /* Not a TAB */
-        (c != 0x0c)) {             /* Not a form feed */
-        return 1;
-    } else {
-        return 0;
-    }
+/* Return true when c is a binary character */
+/* bool since the ISO C23 modernization (it returned int 1 or 0 before);
+ * [[nodiscard]] in common.h. */
+bool binaryCharW(wint_t c) {
+    /* In C the result of '&&' has type int. The cast states the conversion
+     * to the bool return type explicitly. */
+    return (bool)((c < D2U_CHAR_SPACE) && (c != D2U_CHAR_LF) && /* Not an LF */
+                  (c != D2U_CHAR_CR) &&                         /* Not a CR */
+                  (c != D2U_CHAR_TAB) &&                        /* Not a TAB */
+                  (c != D2U_CHAR_FF));                          /* Not a form feed */
 }
 #endif
 
@@ -3484,21 +3821,23 @@ void logBinaryChar(CFlag *ipFlag, int c, unsigned int line_nr, const char *progn
         if (ipFlag->stdio_mode) {
             ipFlag->error = 1;
         } else {
-            ipFlag->error = ipFlag->error_binary;
+            /* ipFlag->error is an int status and error_binary is a bool:
+             * the error status becomes 1 when a binary file is an error. */
+            ipFlag->error = ipFlag->error_binary ? 1 : 0;
         }
     }
     D2U_UTF8_FPRINTF(stderr, "%s: ", progname);
     D2U_UTF8_FPRINTF(stderr, _("Binary symbol 0x%02X found at line %u\n"), c, line_nr);
 }
 
-/* Return 1 when c is a binary character */
-int binaryChar(int c) {
-    if ((c < 32) && (c != '\x0a') && /* Not an LF */
-        (c != '\x0d') &&             /* Not a CR */
-        (c != '\x09') &&             /* Not a TAB */
-        (c != '\x0c')) {             /* Not a form feed */
-        return 1;
-    } else {
-        return 0;
-    }
+/* Return true when c is a binary character */
+/* bool since the ISO C23 modernization (it returned int 1 or 0 before);
+ * [[nodiscard]] in common.h. */
+bool binaryChar(int c) {
+    /* In C the result of '&&' has type int. The cast states the conversion
+     * to the bool return type explicitly. */
+    return (bool)((c < D2U_CHAR_SPACE) && (c != D2U_CHAR_LF) && /* Not an LF */
+                  (c != D2U_CHAR_CR) &&                         /* Not a CR */
+                  (c != D2U_CHAR_TAB) &&                        /* Not a TAB */
+                  (c != D2U_CHAR_FF));                          /* Not a form feed */
 }
