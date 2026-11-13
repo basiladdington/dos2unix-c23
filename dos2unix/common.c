@@ -244,8 +244,9 @@ int d2u_WideCharToMultiByte(UINT CodePage, DWORD dwFlags, LPCWSTR lpWideCharStr,
     int i;
 
     if ((i = WideCharToMultiByte(CodePage, dwFlags, lpWideCharStr, cchWideChar, lpMultiByteStr,
-                                 cbMultiByte, lpDefaultChar, lpUsedDefaultChar)) == 0)
+                                 cbMultiByte, lpDefaultChar, lpUsedDefaultChar)) == 0) {
         d2u_PrintLastError("dos2unix");
+    }
 
     return i;
 }
@@ -255,8 +256,9 @@ int d2u_MultiByteToWideChar(UINT CodePage, DWORD dwFlags, LPCSTR lpMultiByteStr,
     int i;
 
     if ((i = MultiByteToWideChar(CodePage, dwFlags, lpMultiByteStr, cbMultiByte, lpWideCharStr,
-                                 cchWideChar)) == 0)
+                                 cchWideChar)) == 0) {
         d2u_PrintLastError("dos2unix");
+    }
     return i;
 }
 
@@ -333,8 +335,9 @@ void d2u_utf8_fprintf(FILE *stream, const char *format, ...) {
         outputCP = GetConsoleOutputCP();
         SetConsoleOutputCP(CP_UTF8);
         if (!BOM_printed) {
-            if (d2u_display_encoding == D2U_DISPLAY_UTF8BOM)
+            if (d2u_display_encoding == D2U_DISPLAY_UTF8BOM) {
                 fwprintf(stream, L"%S", "\xEF\xBB\xBF");
+            }
             BOM_printed = true;
         }
         fwprintf(stream, L"%S", buf);
@@ -357,8 +360,9 @@ void d2u_utf8_fprintf(FILE *stream, const char *format, ...) {
         prevmode = _setmode(_fileno(stream), _O_U16TEXT);
         if (!BOM_printed) {
             /* For correct redirection in PowerShell we need to print a BOM */
-            if (d2u_display_encoding == D2U_DISPLAY_UNICODEBOM)
+            if (d2u_display_encoding == D2U_DISPLAY_UNICODEBOM) {
                 fwprintf(stream, L"\xfeff");
+            }
             BOM_printed = true;
         }
         fwprintf(stream, L"%ls", wstr);
@@ -465,8 +469,9 @@ bool symbolic_link(const char *path) {
     d2u_MultiByteToWideChar(CP_UTF8, 0, path, -1, pathw, D2U_MAX_PATH);
     attrs = GetFileAttributesW(pathw);
 
-    if (attrs == INVALID_FILE_ATTRIBUTES)
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
         return false;
+    }
 
     return ((attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0);
 }
@@ -478,8 +483,9 @@ bool symbolic_link(const char *path) {
 
     attrs = GetFileAttributes(path);
 
-    if (attrs == INVALID_FILE_ATTRIBUTES)
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
         return false;
+    }
 
     return ((attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0);
 }
@@ -532,25 +538,32 @@ int regfile(char *path, bool allowSymlinks, CFlag *ipFlag, const char *progname)
         D2U_UTF8_FPRINTF(stderr, "%s: %s", progname, path);
         D2U_UTF8_FPRINTF(stderr, " MODE 0%o ", buf.st_mode);
 #ifdef S_ISSOCK
-        if (S_ISSOCK(buf.st_mode))
+        if (S_ISSOCK(buf.st_mode)) {
             D2U_UTF8_FPRINTF(stderr, " (socket)");
+        }
 #endif
 #ifdef S_ISLNK
-        if (S_ISLNK(buf.st_mode))
+        if (S_ISLNK(buf.st_mode)) {
             D2U_UTF8_FPRINTF(stderr, " (symbolic link)");
+        }
 #endif
-        if (S_ISREG(buf.st_mode))
+        if (S_ISREG(buf.st_mode)) {
             D2U_UTF8_FPRINTF(stderr, " (regular file)");
+        }
 #ifdef S_ISBLK
-        if (S_ISBLK(buf.st_mode))
+        if (S_ISBLK(buf.st_mode)) {
             D2U_UTF8_FPRINTF(stderr, " (block device)");
+        }
 #endif
-        if (S_ISDIR(buf.st_mode))
+        if (S_ISDIR(buf.st_mode)) {
             D2U_UTF8_FPRINTF(stderr, " (directory)");
-        if (S_ISCHR(buf.st_mode))
+        }
+        if (S_ISCHR(buf.st_mode)) {
             D2U_UTF8_FPRINTF(stderr, " (character device)");
-        if (S_ISFIFO(buf.st_mode))
+        }
+        if (S_ISFIFO(buf.st_mode)) {
             D2U_UTF8_FPRINTF(stderr, " (FIFO)");
+        }
         D2U_UTF8_FPRINTF(stderr, "\n");
 #endif
         if ((S_ISREG(buf.st_mode))
@@ -559,8 +572,9 @@ int regfile(char *path, bool allowSymlinks, CFlag *ipFlag, const char *progname)
 #endif
         )
             return (0);
-        else
+        else {
             return (-1);
+        }
     } else {
         if (ipFlag->verbose) {
             const char *errstr = strerror(errno);
@@ -645,14 +659,16 @@ int glob_warg(int argc, wchar_t *wargv[], char ***argv, CFlag *ipFlag, const cha
      * returned by d2u_WideCharToMultiByte() are used without a check for
      * its error value 0. The places are marked "AUDIT NOTE" below. */
     argv_new = (char **)malloc(sizeof(char **));
-    if (argv_new == nullptr)
+    if (argv_new == nullptr) {
         goto glob_failed;
+    }
 
     /* AUDIT NOTE: len is 0 when the conversion failed; not checked. */
     len = (size_t)d2u_WideCharToMultiByte(CP_UTF8, 0, wargv[0], -1, nullptr, 0, nullptr, nullptr);
     arg = (char *)malloc(len);
-    if (arg == nullptr)
+    if (arg == nullptr) {
         goto glob_failed;
+    }
     d2u_WideCharToMultiByte(CP_UTF8, 0, wargv[argc_glob], -1, arg, (int)len, nullptr, nullptr);
     argv_new[argc_glob] = arg;
 
@@ -662,8 +678,9 @@ int glob_warg(int argc, wchar_t *wargv[], char ***argv, CFlag *ipFlag, const cha
         add_path = 0;
         /* FindFileData.cFileName has the path stripped off. We need to add it again. */
         path = _wcsdup(warg);
-        if (path == nullptr)
+        if (path == nullptr) {
             goto glob_failed;
+        }
         /* replace all back slashes with slashes */
         while ((ptr = wcschr(path, L'\\')) != nullptr) {
             *ptr = L'/';
@@ -715,8 +732,9 @@ int glob_warg(int argc, wchar_t *wargv[], char ***argv, CFlag *ipFlag, const cha
                 free(path);
                 free(arg);
                 goto glob_failed;
-            } else
+            } else {
                 argv_new = new_argv_new;
+            }
             argv_new[argc_glob] = arg;
 
             if (!FindNextFileW(hFind, &FindFileData)) {
@@ -733,15 +751,17 @@ int glob_warg(int argc, wchar_t *wargv[], char ***argv, CFlag *ipFlag, const cha
             len =
                 (size_t)d2u_WideCharToMultiByte(CP_UTF8, 0, warg, -1, nullptr, 0, nullptr, nullptr);
             arg = (char *)malloc((size_t)len);
-            if (arg == nullptr)
+            if (arg == nullptr) {
                 goto glob_failed;
+            }
             d2u_WideCharToMultiByte(CP_UTF8, 0, warg, -1, arg, (int)len, nullptr, nullptr);
             /* AUDIT NOTE: unchecked size arithmetic, see above. */
             new_argv_new = (char **)realloc(argv_new, (size_t)(argc_glob + 1) * sizeof(char **));
-            if (new_argv_new == nullptr)
+            if (new_argv_new == nullptr) {
                 goto glob_failed;
-            else
+            } else {
                 argv_new = new_argv_new;
+            }
             argv_new[argc_glob] = arg;
         }
     }
@@ -757,8 +777,9 @@ glob_failed:
     }
     // Cleanup of allocated memory in glob_failed:
     for (int j = 0; j < argc_glob; ++j) {
-        if (argv_new[j])
+        if (argv_new[j]) {
             free(argv_new[j]);
+        }
     }
     free(argv_new);
     return -1;
@@ -1108,17 +1129,20 @@ char *dirname(char *path) {
     char *ptr;
 
     /* replace all back slashes with slashes */
-    while ((ptr = strchr(path, '\\')) != nullptr)
+    while ((ptr = strchr(path, '\\')) != nullptr) {
         *ptr = '/';
+    }
     /* Code checkers may report that the condition (path == NULL) is redundant.
        E.g. Cppcheck 1.72. The condition (path == NULL) is needed, because
        the behaviour of strrchr is not specified when it get's a NULL string.
        The behaviour may be undefined, dependent on the implementation. */
-    if ((path == nullptr) || ((ptr = strrchr(path, '/')) == nullptr))
+    if ((path == nullptr) || ((ptr = strrchr(path, '/')) == nullptr)) {
         return ".";
+    }
 
-    if (strcmp(path, "/") == 0)
+    if (strcmp(path, "/") == 0) {
         return "/";
+    }
 
     *ptr = '\0';
     return path;
@@ -1129,17 +1153,20 @@ char *basename(char *path) {
     char *ptr;
 
     /* replace all back slashes with slashes */
-    while ((ptr = strchr(path, '\\')) != nullptr)
+    while ((ptr = strchr(path, '\\')) != nullptr) {
         *ptr = '/';
+    }
     /* Code checkers may report that the condition (path == NULL) is redundant.
        E.g. Cppcheck 1.72. The condition (path == NULL) is needed, because
        the behaviour of strrchr is not specified when it get's a NULL string.
        The behaviour may be undefined, dependent on the implementation. */
-    if ((path == nullptr) || ((ptr = strrchr(path, '/')) == nullptr))
+    if ((path == nullptr) || ((ptr = strrchr(path, '/')) == nullptr)) {
         return path;
+    }
 
-    if (strcmp(path, "/") == 0)
+    if (strcmp(path, "/") == 0) {
         return "/";
+    }
 
     ptr++;
     return ptr;
@@ -1173,8 +1200,9 @@ char *basename(char *path) {
     char szTempFileName[MAX_PATH];
     char *fname_str;
 #endif
-    if ((cpy1 = strdup(template)) == nullptr)
+    if ((cpy1 = strdup(template)) == nullptr) {
         return nullptr;
+    }
     if ((cpy2 = strdup(template)) == nullptr) {
         free(cpy1);
         return nullptr;
@@ -1188,14 +1216,17 @@ char *basename(char *path) {
         D2U_UTF8_FPRINTF(stderr, " %s\n", dn);
         error = true;
     }
-    if ((!error) && (d2u_MultiByteToWideChar(CP_UTF8, 0, dn, -1, dnw, MAX_PATH) == 0))
+    if ((!error) && (d2u_MultiByteToWideChar(CP_UTF8, 0, dn, -1, dnw, MAX_PATH) == 0)) {
         error = true;
-    if ((!error) && (d2u_MultiByteToWideChar(CP_UTF8, 0, bn, -1, bnw, MAX_PATH) == 0))
+    }
+    if ((!error) && (d2u_MultiByteToWideChar(CP_UTF8, 0, bn, -1, bnw, MAX_PATH) == 0)) {
         error = true;
+    }
     free(cpy1);
     free(cpy2);
-    if (error)
+    if (error) {
         return nullptr;
+    }
     uRetVal = GetTempFileNameW(dnw, bnw, 0, szTempFileNamew);
     if (!uRetVal) {
         d2u_PrintLastError("dos2unix");
@@ -1208,11 +1239,13 @@ char *basename(char *path) {
     len = (size_t)d2u_WideCharToMultiByte(CP_UTF8, 0, szTempFileNamew, -1, nullptr, 0, nullptr,
                                           nullptr);
     fname_str = (char *)malloc(len);
-    if (!fname_str)
+    if (!fname_str) {
         return nullptr;
+    }
     if (d2u_WideCharToMultiByte(CP_UTF8, 0, szTempFileNamew, -1, fname_str, MAX_PATH, nullptr,
-                                nullptr) == 0)
+                                nullptr) == 0) {
         return nullptr;
+    }
 #else
     uRetVal = GetTempFileNameA(dn, bn, 0, szTempFileName);
     free(cpy1);
@@ -1226,13 +1259,15 @@ char *basename(char *path) {
      * characters. */
     len = strlen(szTempFileName) + 1;
     fname_str = (char *)malloc(len);
-    if (!fname_str)
+    if (!fname_str) {
         return nullptr;
+    }
     d2u_strncpy(fname_str, szTempFileName, len);
 #endif
     /* replace all back slashes with slashes */
-    while ((ptr = strchr(fname_str, '\\')) != nullptr)
+    while ((ptr = strchr(fname_str, '\\')) != nullptr) {
         *ptr = '/';
+    }
     return fname_str;
 
 #else
@@ -1303,11 +1338,13 @@ FILE *MakeTempFileFrom(const char *OutFN, char **fname_ret) {
     cpy = nullptr;
 
 #ifdef NO_MKSTEMP
-    if ((name = d2u_mktemp(fname_str)) == nullptr)
+    if ((name = d2u_mktemp(fname_str)) == nullptr) {
         goto make_failed;
+    }
     *fname_ret = name;
-    if ((fp = OpenOutFile(name)) == nullptr)
+    if ((fp = OpenOutFile(name)) == nullptr) {
         goto make_failed;
+    }
 #else
     if ((fd = mkstemp(fname_str)) == -1) {
         goto make_failed;
@@ -1999,8 +2036,9 @@ int ConvertNewFile(char *ipInFN, char *ipOutFN, CFlag *ipFlag, const char *progn
         }
     }
 #else
-    if ((!RetVal) && (Convert(InB, TempF, ipFlag, progname)))
+    if ((!RetVal) && (Convert(InB, TempF, ipFlag, progname))) {
         RetVal = -1;
+    }
 #endif
 
     /* can close in file? */
@@ -2296,8 +2334,9 @@ int ConvertNewFile(char *ipInFN, char *ipOutFN, CFlag *ipFlag, const char *progn
         }
     }
 #else
-    if ((!RetVal) && (Convert(InB, stdout, ipFlag, progname)))
+    if ((!RetVal) && (Convert(InB, stdout, ipFlag, progname))) {
         RetVal = -1;
+    }
 #endif
 
     /* can close in file? */
@@ -2421,10 +2460,11 @@ void print_format(const CFlag *pFlag, char *informat, char *outformat, size_t li
 #endif
 
 #if defined(_WIN32) && !defined(__CYGWIN__) /* Windows, not Cygwin */
-        if (pFlag->locale_target == TARGET_GB18030)
+        if (pFlag->locale_target == TARGET_GB18030) {
             d2u_strncpy(outformat, _("GB18030"), lout);
-        else
+        } else {
             d2u_strncpy(outformat, _("UTF-8"), lout);
+        }
 #endif
 
         if (pFlag->keep_utf16) {
@@ -3098,16 +3138,17 @@ int parse_options(int argc, char *argv[], CFlag *pFlag, const char *localedir, c
 #ifdef D2U_UNIFILE
     ptr = getenv("DOS2UNIX_DISPLAY_ENC");
     if (ptr != nullptr) {
-        if (strncmp(ptr, "ansi", sizeof("ansi")) == 0)
+        if (strncmp(ptr, "ansi", sizeof("ansi")) == 0) {
             d2u_display_encoding = D2U_DISPLAY_ANSI;
-        else if (strncmp(ptr, "unicode", sizeof("unicode")) == 0)
+        } else if (strncmp(ptr, "unicode", sizeof("unicode")) == 0) {
             d2u_display_encoding = D2U_DISPLAY_UNICODE;
-        else if (strncmp(ptr, "unicodebom", sizeof("unicodebom")) == 0)
+        } else if (strncmp(ptr, "unicodebom", sizeof("unicodebom")) == 0) {
             d2u_display_encoding = D2U_DISPLAY_UNICODEBOM;
-        else if (strncmp(ptr, "utf8", sizeof("utf8")) == 0)
+        } else if (strncmp(ptr, "utf8", sizeof("utf8")) == 0) {
             d2u_display_encoding = D2U_DISPLAY_UTF8;
-        else if (strncmp(ptr, "utf8bom", sizeof("utf8bom")) == 0)
+        } else if (strncmp(ptr, "utf8bom", sizeof("utf8bom")) == 0) {
             d2u_display_encoding = D2U_DISPLAY_UTF8BOM;
+        }
     }
 #endif
 
@@ -3335,15 +3376,15 @@ int parse_options(int argc, char *argv[], CFlag *pFlag, const char *localedir, c
             else if ((strcmp(argv[ArgIdx], "-D") == 0) ||
                      (strcmp(argv[ArgIdx], "--display-enc") == 0)) {
                 if (++ArgIdx < argc) {
-                    if (strcmpi(argv[ArgIdx], "ansi") == 0)
+                    if (strcmpi(argv[ArgIdx], "ansi") == 0) {
                         d2u_display_encoding = D2U_DISPLAY_ANSI;
-                    else if (strcmpi(argv[ArgIdx], "unicode") == 0)
+                    } else if (strcmpi(argv[ArgIdx], "unicode") == 0) {
                         d2u_display_encoding = D2U_DISPLAY_UNICODE;
-                    else if (strcmpi(argv[ArgIdx], "unicodebom") == 0)
+                    } else if (strcmpi(argv[ArgIdx], "unicodebom") == 0) {
                         d2u_display_encoding = D2U_DISPLAY_UNICODEBOM;
-                    else if (strcmpi(argv[ArgIdx], "utf8") == 0)
+                    } else if (strcmpi(argv[ArgIdx], "utf8") == 0) {
                         d2u_display_encoding = D2U_DISPLAY_UTF8;
-                    else if (strcmpi(argv[ArgIdx], "utf8bom") == 0) {
+                    } else if (strcmpi(argv[ArgIdx], "utf8bom") == 0) {
                         d2u_display_encoding = D2U_DISPLAY_UTF8BOM;
                     } else {
                         D2U_UTF8_FPRINTF(stderr, "%s: ", progname);

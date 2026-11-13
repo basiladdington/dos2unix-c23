@@ -1,0 +1,15 @@
+Checks: >
+  -*,
+  readability-*,
+  modernize-*,
+  bugprone-*,
+  clang-analyzer-*,
+  clang-diagnostic-*,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  -readability-magic-numbers,
+  -readability-identifier-length,
+  -modernize-redundant-void-arg
+HeaderFilterRegex: '.*'
+CheckOptions:
+  - key: readability-function-cognitive-complexity.Threshold
+    value: '35'

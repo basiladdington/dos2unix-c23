@@ -69,16 +69,17 @@ unsigned short query_con_codepage(void) {
     regs.x.flags |= 1;       /* preset carry for potential failure */
     __dpmi_int(0x21, &regs);
 
-    if (!(regs.x.flags & 1)) /* if succeed (carry flag not set) */
+    if (!(regs.x.flags & 1)) { /* if succeed (carry flag not set) */
         dosmemget(__tb, 4, param_block);
-    else {                  /* (undocumented method) */
+    } else {                /* (undocumented method) */
         regs.x.ax = 0xAD02; /* 440C -> MS-DOS or DR-DOS only */
         regs.x.bx = 0xFFFE; /* AD02 -> MS-DOS or FreeDOS only */
         regs.x.flags |= 1;
         __dpmi_int(0x2F, &regs);
 
-        if ((!(regs.x.flags & 1)) && (regs.x.bx < 0xFFFE))
+        if ((!(regs.x.flags & 1)) && (regs.x.bx < 0xFFFE)) {
             param_block[1] = regs.x.bx;
+        }
     }
 
     return param_block[1];
@@ -117,8 +118,9 @@ unsigned short query_con_codepage(void) {
         int86(0x2F, &regs, &regs);
     }
 
-    if ((!(regs.x.cflag)) && (regs.x.bx < 0xFFFE))
+    if ((!(regs.x.cflag)) && (regs.x.bx < 0xFFFE)) {
         param_block[1] = regs.x.bx;
+    }
 
     return param_block[1];
 }
@@ -159,8 +161,9 @@ unsigned short query_con_codepage(void) {
         int386(0x2F, &regs, &regs);
     }
 
-    if ((!(regs.x.cflag)) && (regs.x.ebx < 0xFFFE))
+    if ((!(regs.x.cflag)) && (regs.x.ebx < 0xFFFE)) {
         param_block[1] = regs.x.ebx;
+    }
 
     return param_block[1];
 }
