@@ -26,7 +26,7 @@ Execute these four phases in order for every task:
 1. **Strict C23 Release Build:**
    `make -C dos2unix clean && make -C dos2unix CC=clang CFLAGS="-std=c23 -O2 -Wall -Wextra -Wconversion -Wpedantic -g" dos2unix unix2dos`
 2. **Runtime Sanitizer Check (`ASan` + `UBSan`):**
-   Compile with `-fsanitize=address,undefined -fno-omit-frame-pointer` and run `~/Projects/c23-sandbox/scripts/verify.sh` to verify zero memory or undefined-behavior errors, then rebuild with standard flags above.
+   Compile with `-fsanitize=address,undefined -fno-omit-frame-pointer` and run `./c23-verification/verify.sh` to verify zero memory or undefined-behavior errors, then rebuild with standard flags above.
 3. **Static Analysis:**
    Run `clang-tidy -p . -checks='-*,bugprone-*,cert-*,readability-*'` on modified `.c` files and confirm zero new warnings.
 

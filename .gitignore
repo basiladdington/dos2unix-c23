@@ -14,3 +14,12 @@
 dos2unix.txt
 dos2unix-man.pot
 dos2unix/man/*/man1/*.pod
+
+# Local C23 build & analysis artifacts
+dos2unix/dos2unix
+dos2unix/unix2dos
+dos2unix/mac2unix
+dos2unix/unix2mac
+*.o
+compile_commands.json
+docs_callers_*.txt

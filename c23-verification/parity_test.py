@@ -5,14 +5,67 @@ For every case both binaries get the same input and arguments. The stdout
 bytes, the stderr text, the exit status and (for file cases) the resulting
 file contents must be identical. Any sanitizer report in stderr is a failure.
 
-usage: parity_test.py MODERN_BINARY BASELINE_BINARY WORKDIR
+How to run
+----------
+  ./c23-verification/parity_test.py
+      Automatic mode, works from any current directory. Compares the newly
+      built <repo>/dos2unix/dos2unix and <repo>/dos2unix/unix2dos (build them
+      first) with the baseline binaries, see "Baseline" below. Both programs
+      run the same cases.
+
+  ./c23-verification/parity_test.py MODERN_BINARY BASELINE_BINARY [WORKDIR]
+      Explicit mode: compare two given binaries. The cases run in the
+      directory WORKDIR/case, which is deleted and created again for every
+      case. Without WORKDIR a temporary directory is used.
+
+The exit status is 0 when every case is identical, 1 when a case differs and
+2 for a usage or setup error.
+
+Paths
+-----
+All paths are derived from the directory that holds this script:
+<repo>/c23-verification/ for the script and <repo>/dos2unix/ for the newly
+built programs. Nothing is written into the repository.
+
+Baseline (automatic mode)
+-------------------------
+Each baseline program is looked up on its own:
+  1. $D2U_BASELINE (dos2unix) and $U2D_BASELINE (unix2dos), when set: paths of
+     pre-built upstream binaries.
+  2. $HOME/Projects/c23-sandbox/baselines/dos2unix.orig and unix2dos.orig,
+     when present: the author's local copies.
+  3. Automatic fallback for what is still missing: the upstream sources are
+     exported with "git archive master dos2unix | tar -x" into a temporary
+     directory, and dos2unix and unix2dos are built there with make.
+Environment variables for the fallback:
+  D2U_BASELINE_REF          git ref to build instead of master (origin/master
+                            is tried when the clone has no local master).
+  D2U_FORCE_BASELINE_BUILD  set to 1 to always build both from git.
+  CC                        compiler for the baseline build (default: clang).
+The temporary directory, with the baseline build and the working files, is
+removed when the script ends, also after an error or Ctrl-C.
+
+Needs Python 3.8 or newer. The baseline fallback also needs git, tar, make
+and a C compiler.
 """
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 
-modern, orig, work = sys.argv[1:4]
+# All paths start at the directory of this script, so the test runs from any
+# clone and from any current directory.
+SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+REPO_ROOT = os.path.dirname(SCRIPT_DIR)
+REPO_SRC = os.path.join(REPO_ROOT, "dos2unix")
+LOCAL_BASELINES = os.path.join(os.path.expanduser("~"), "Projects", "c23-sandbox", "baselines")
+BUILD_HINT = (
+    f'  make -C "{REPO_SRC}" CC=clang '
+    'CFLAGS="-std=c23 -O2 -Wall -Wextra -Wconversion -Wpedantic -g" dos2unix unix2dos'
+)
+
 ENV = dict(os.environ, LC_ALL="C.UTF-8", LANGUAGE="C")
 SAN_MARKERS = (b"AddressSanitizer", b"runtime error", b"LeakSanitizer", b"UndefinedBehaviorSanitizer")
 
@@ -146,13 +199,8 @@ def run(binary, argv, stdin, cwd):
     return p.returncode, p.stdout, p.stderr
 
 
-failures = 0
-total = 0
-
-
 def check(name, results):
-    global failures, total
-    total += 1
+    """Compare the results of the two binaries. Returns True when they are identical."""
     (rc_m, out_m, err_m, snap_m), (rc_o, out_o, err_o, snap_o) = results
     problems = []
     if any(m in err_m for m in SAN_MARKERS):
@@ -166,42 +214,179 @@ def check(name, results):
     if snap_m != snap_o:
         problems.append("resulting files differ")
     if problems:
-        failures += 1
         print(f"FAIL  {name}: {', '.join(problems)}")
         if "sanitizer report" in problems or "stderr differs" in problems:
             print("   modern stderr:", err_m[:600])
             print("   orig   stderr:", err_o[:600])
+    return not problems
 
 
-for name, argv, data in STDIO:
-    res = []
-    for binary in (modern, orig):
-        d = os.path.join(work, "case")
-        shutil.rmtree(d, ignore_errors=True)
-        os.makedirs(d)
-        rc, out, err = run(binary, argv, data, d)
-        res.append((rc, out, err, snapshot(d)))
-    check("stdio: " + name, res)
+def run_suite(modern, orig, work):
+    """Run all cases for one pair of binaries. Returns (total, failures)."""
+    failures = 0
+    total = 0
 
-for name, pre, files, post in FILES:
-    res = []
-    for binary in (modern, orig):
-        d = os.path.join(work, "case")
-        shutil.rmtree(d, ignore_errors=True)
-        os.makedirs(d)
-        for fn, content in files.items():
-            if fn.startswith("@"):
-                os.symlink(content.decode(), os.path.join(d, fn[1:]))
-            else:
-                with open(os.path.join(d, fn), "wb") as fh:
-                    fh.write(content)
-                os.utime(os.path.join(d, fn), (1_600_000_000, 1_600_000_000))
-        rc, out, err = run(binary, pre + post, b"", d)
-        snap = snapshot(d)
-        if "-k" in pre:
-            snap["__mtime"] = str(int(os.stat(os.path.join(d, post[0])).st_mtime)).encode()
-        res.append((rc, out, err, snap))
-    check("file: " + name, res)
+    for name, argv, data in STDIO:
+        res = []
+        for binary in (modern, orig):
+            d = os.path.join(work, "case")
+            shutil.rmtree(d, ignore_errors=True)
+            os.makedirs(d)
+            rc, out, err = run(binary, argv, data, d)
+            res.append((rc, out, err, snapshot(d)))
+        total += 1
+        if not check("stdio: " + name, res):
+            failures += 1
 
-print(f"{total - failures} of {total} cases identical to the baseline, {failures} failed")
-sys.exit(1 if failures else 0)
+    for name, pre, files, post in FILES:
+        res = []
+        for binary in (modern, orig):
+            d = os.path.join(work, "case")
+            shutil.rmtree(d, ignore_errors=True)
+            os.makedirs(d)
+            for fn, content in files.items():
+                if fn.startswith("@"):
+                    os.symlink(content.decode(), os.path.join(d, fn[1:]))
+                else:
+                    with open(os.path.join(d, fn), "wb") as fh:
+                        fh.write(content)
+                    os.utime(os.path.join(d, fn), (1_600_000_000, 1_600_000_000))
+            rc, out, err = run(binary, pre + post, b"", d)
+            snap = snapshot(d)
+            if "-k" in pre:
+                snap["__mtime"] = str(int(os.stat(os.path.join(d, post[0])).st_mtime)).encode()
+            res.append((rc, out, err, snap))
+        total += 1
+        if not check("file: " + name, res):
+            failures += 1
+
+    return total, failures
+
+
+def setup_error(message):
+    print("ERROR: " + message, file=sys.stderr)
+    sys.exit(2)
+
+
+def is_executable(p):
+    return os.path.isfile(p) and os.access(p, os.X_OK)
+
+
+def git_ref_exists(ref):
+    return subprocess.run(
+        ["git", "-C", REPO_ROOT, "rev-parse", "--verify", "--quiet", ref + "^{commit}"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    ).returncode == 0
+
+
+def build_baseline_from_git(tmp):
+    """Fallback for hosts without pre-built baseline binaries.
+
+    Export the upstream sources of the baseline ref from git into the
+    temporary directory tmp and build dos2unix and unix2dos there. The caller
+    removes tmp. The modernization branch starts at master, so master is the
+    untouched upstream code. Returns (directory of the binaries, git ref).
+    """
+    for tool in ("git", "tar", "make"):
+        if shutil.which(tool) is None:
+            setup_error(f"building the baseline needs '{tool}', which is not in PATH.")
+    inside = subprocess.run(["git", "-C", REPO_ROOT, "rev-parse", "--git-dir"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if inside.returncode != 0:
+        setup_error(f"{REPO_ROOT} is not a git checkout, so the baseline cannot be built from the "
+                    "master branch. Set D2U_BASELINE and U2D_BASELINE to pre-built upstream binaries.")
+    ref = os.environ.get("D2U_BASELINE_REF", "")
+    if not ref:
+        # A clone whose default branch is not master has only origin/master.
+        ref = next((r for r in ("master", "origin/master") if git_ref_exists(r)), "")
+    if not ref or not git_ref_exists(ref):
+        setup_error(f"baseline git ref not found: {ref or 'master, origin/master'}. "
+                    "Set D2U_BASELINE_REF, or D2U_BASELINE and U2D_BASELINE.")
+
+    print(f"Building the baseline from git ref '{ref}' (temporary)...", flush=True)
+    src = os.path.join(tmp, "baseline_src")
+    os.makedirs(src)
+    # git archive REF dos2unix | tar -x -C src
+    archive = subprocess.Popen(["git", "-C", REPO_ROOT, "archive", ref, "dos2unix"], stdout=subprocess.PIPE)
+    untar = subprocess.run(["tar", "-x", "-C", src], stdin=archive.stdout)
+    archive.stdout.close()
+    if archive.wait() != 0 or untar.returncode != 0:
+        setup_error(f"exporting git ref '{ref}' failed.")
+    build = subprocess.run(
+        ["make", "-s", "-C", os.path.join(src, "dos2unix"), "CC=" + os.environ.get("CC", "clang"),
+         "dos2unix", "unix2dos"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    )
+    if build.returncode != 0:
+        sys.stderr.buffer.write(build.stdout)
+        setup_error(f"building the baseline from git ref '{ref}' failed.")
+    return os.path.join(src, "dos2unix"), ref
+
+
+def find_baselines(tmp):
+    """Return {program: (path, origin)} for dos2unix and unix2dos, see the header."""
+    force = os.environ.get("D2U_FORCE_BASELINE_BUILD", "0") == "1"
+    found = {}
+    built = None
+    for prog, var in (("dos2unix", "D2U_BASELINE"), ("unix2dos", "U2D_BASELINE")):
+        given = os.environ.get(var, "")
+        local = os.path.join(LOCAL_BASELINES, prog + ".orig")
+        if not force and given:
+            if not is_executable(given):
+                setup_error(f"baseline binary not found or not executable: {given}")
+            found[prog] = (given, "pre-built, from " + var)
+        elif not force and is_executable(local):
+            found[prog] = (local, "pre-built local copy")
+        else:
+            if built is None:
+                built = build_baseline_from_git(tmp)
+            found[prog] = (os.path.join(built[0], prog), f"built from git ref '{built[1]}'")
+    return found
+
+
+def main(argv):
+    # Leave through the normal exit path on SIGTERM, so that the temporary
+    # directory is removed.
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(143))
+
+    if len(argv) not in (0, 2, 3):
+        print("usage: parity_test.py                                          (automatic mode)\n"
+              "       parity_test.py MODERN_BINARY BASELINE_BINARY [WORKDIR]  (explicit mode)\n"
+              "See the header of this script for details.", file=sys.stderr)
+        return 2
+
+    # The temporary directory holds the baseline build and the working files.
+    # It is removed when the 'with' block is left, also by an error or Ctrl-C.
+    with tempfile.TemporaryDirectory(prefix="d2u_parity.") as tmp:
+        if argv:
+            # Explicit mode.
+            modern, orig = os.path.abspath(argv[0]), os.path.abspath(argv[1])
+            for binary in (modern, orig):
+                if not is_executable(binary):
+                    setup_error(f"binary not found or not executable: {binary}")
+            work = os.path.abspath(argv[2]) if len(argv) == 3 else os.path.join(tmp, "work")
+            os.makedirs(work, exist_ok=True)
+            total, failures = run_suite(modern, orig, work)
+            print(f"{total - failures} of {total} cases identical to the baseline, {failures} failed")
+            return 1 if failures else 0
+
+        # Automatic mode: both programs of this repository.
+        for prog in ("dos2unix", "unix2dos"):
+            if not is_executable(os.path.join(REPO_SRC, prog)):
+                setup_error(f"{os.path.join(REPO_SRC, prog)} not found. Build the project first:\n{BUILD_HINT}")
+        baselines = find_baselines(tmp)
+        work = os.path.join(tmp, "work")
+        os.makedirs(work)
+        failed = False
+        for prog in ("dos2unix", "unix2dos"):
+            modern = os.path.join(REPO_SRC, prog)
+            orig, origin = baselines[prog]
+            print(f"{prog}: {modern}\n  against the baseline {orig} ({origin})", flush=True)
+            total, failures = run_suite(modern, orig, work)
+            print(f"{prog}: {total - failures} of {total} cases identical to the baseline, {failures} failed")
+            failed = failed or failures > 0
+        return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
