@@ -25,15 +25,55 @@
  *  IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef __DOS2UNIX_H
-#define __DOS2UNIX_H
+/* Include guard. It was named __DOS2UNIX_H before. Identifiers that begin with
+ * two underscores are reserved for the implementation in ISO C, so the
+ * guard now has the D2U_ prefix, like D2U_QUERYCP_H in querycp.h. */
+#ifndef D2U_DOS2UNIX_H
+#define D2U_DOS2UNIX_H
 
 #include "common.h"
+/* <limits.h>: UCHAR_MAX gives the number of entries of a conversion table. */
+#include <limits.h>
 
-#ifdef __DOS2UNIX_C
+/* Conversion tables.
+ *
+ * Why the tables are in this header, behind D2U_DOS2UNIX_C:
+ * The tables are 'static' data: every source file that compiles them gets
+ * its own copy. Only dos2unix.c converts characters, and only dos2unix.c
+ * defines D2U_DOS2UNIX_C before it includes this header. Every other file that
+ * includes this header gets only the function prototypes at the end, and
+ * no unused copy of the tables. Keeping the tables in the header keeps
+ * eight tables of 256 entries each out of the conversion code in
+ * dos2unix.c.
+ * (The macro was named __DOS2UNIX_C before, it was renamed for the same reason
+ * as the include guard.)
+ *
+ * Table invariants:
+ * - Every table has exactly D2U_CONV_TABLE_SIZE (256) entries, one for
+ *   each value of an unsigned char. A table is indexed with a character
+ *   that d2u_getc() returned. That is 0..255 or EOF, and dos2unix.c handles
+ *   EOF before it uses a character as an index.
+ * - The entries are character constants. A character constant has type
+ *   int, and '\x80'..'\xff' are negative on platforms where char is
+ *   signed. That is harmless: the entries are only passed to fputc(),
+ *   which converts its argument to unsigned char.
+ *
+ * ISO C23 safeguards:
+ * - 'constexpr' makes the tables read-only compile time constants. The
+ *   conversion functions take a pointer to const int, so they cannot
+ *   change a table by accident.
+ * - The tables are declared without a size, and a static_assert after
+ *   each table checks the number of initializers. With a fixed size of
+ *   256 a table with too few initializers would still compile; the
+ *   missing entries would be zero and convert characters to NUL. */
+#ifdef D2U_DOS2UNIX_C
+
+/* Number of entries of every conversion table: one per unsigned char value. */
+constexpr int D2U_CONV_TABLE_SIZE = UCHAR_MAX + 1;
+
 /* ASCII mode. No conversion. */
 
-static int D2UAsciiTable[256] = {
+static constexpr int D2UAsciiTable[] = {
     '\x00', '\x01', '\x02', '\x03', '\x04', '\x05', '\x06', '\x07', '\x08', '\x09', '\x0a', '\x0b',
     '\x0c', '\x0d', '\x0e', '\x0f', '\x10', '\x11', '\x12', '\x13', '\x14', '\x15', '\x16', '\x17',
     '\x18', '\x19', '\x1a', '\x1b', '\x1c', '\x1d', '\x1e', '\x1f', '\x20', '\x21', '\x22', '\x23',
@@ -57,11 +97,13 @@ static int D2UAsciiTable[256] = {
     '\xf0', '\xf1', '\xf2', '\xf3', '\xf4', '\xf5', '\xf6', '\xf7', '\xf8', '\xf9', '\xfa', '\xfb',
     '\xfc', '\xfd', '\xfe', '\xff',
 };
+static_assert(sizeof(D2UAsciiTable) / sizeof(D2UAsciiTable[0]) == (size_t)D2U_CONV_TABLE_SIZE,
+              "D2UAsciiTable must have one entry for every byte value");
 
 /* 7bit mode. */
 /* All 8 bit non-ASCII characters are converted to a space (\x20) */
 
-static int D2U7BitTable[256] = {
+static constexpr int D2U7BitTable[] = {
     '\x00', '\x01', '\x02', '\x03', '\x04', '\x05', '\x06', '\x07', '\x08', '\x09', '\x0a', '\x0b',
     '\x0c', '\x0d', '\x0e', '\x0f', '\x10', '\x11', '\x12', '\x13', '\x14', '\x15', '\x16', '\x17',
     '\x18', '\x19', '\x1a', '\x1b', '\x1c', '\x1d', '\x1e', '\x1f', '\x20', '\x21', '\x22', '\x23',
@@ -85,11 +127,13 @@ static int D2U7BitTable[256] = {
     '\x20', '\x20', '\x20', '\x20', '\x20', '\x20', '\x20', '\x20', '\x20', '\x20', '\x20', '\x20',
     '\x20', '\x20', '\x20', '\x20',
 };
+static_assert(sizeof(D2U7BitTable) / sizeof(D2U7BitTable[0]) == (size_t)D2U_CONV_TABLE_SIZE,
+              "D2U7BitTable must have one entry for every byte value");
 
 /* CP437 -> ISO-8859-1 */
 /* Non-convertible characters are converted to a dot (\x2e) */
 
-static int D2UIso437Table[256] = {
+static constexpr int D2UIso437Table[] = {
     '\x00', '\x01', '\x02', '\x03', '\x04', '\x05', '\x06', '\x07', '\x08', '\x09', '\x0a', '\x0b',
     '\x0c', '\x0d', '\x0e', '\x0f', '\x10', '\x11', '\x12', '\x13', '\x14', '\x15', '\x16', '\x17',
     '\x18', '\x19', '\x1a', '\x1b', '\x1c', '\x1d', '\x1e', '\x1f', '\x20', '\x21', '\x22', '\x23',
@@ -113,11 +157,13 @@ static int D2UIso437Table[256] = {
     '\x2e', '\xb1', '\x2e', '\x2e', '\x2e', '\x2e', '\xf7', '\x2e', '\xb0', '\x2e', '\xb7', '\x2e',
     '\x2e', '\xb2', '\x2e', '\xa0',
 };
+static_assert(sizeof(D2UIso437Table) / sizeof(D2UIso437Table[0]) == (size_t)D2U_CONV_TABLE_SIZE,
+              "D2UIso437Table must have one entry for every byte value");
 
 /* CP850 -> ISO-8859-1 */
 /* Non-convertible characters are converted to a dot (\x2e) */
 
-static int D2UIso850Table[256] = {
+static constexpr int D2UIso850Table[] = {
     '\x00', '\x01', '\x02', '\x03', '\x04', '\x05', '\x06', '\x07', '\x08', '\x09', '\x0a', '\x0b',
     '\x0c', '\x0d', '\x0e', '\x0f', '\x10', '\x11', '\x12', '\x13', '\x14', '\x15', '\x16', '\x17',
     '\x18', '\x19', '\x1a', '\x1b', '\x1c', '\x1d', '\x1e', '\x1f', '\x20', '\x21', '\x22', '\x23',
@@ -141,11 +187,13 @@ static int D2UIso850Table[256] = {
     '\xad', '\xb1', '\x2e', '\xbe', '\xb6', '\xa7', '\xf7', '\xb8', '\xb0', '\xa8', '\xb7', '\xb9',
     '\xb3', '\xb2', '\x2e', '\xa0',
 };
+static_assert(sizeof(D2UIso850Table) / sizeof(D2UIso850Table[0]) == (size_t)D2U_CONV_TABLE_SIZE,
+              "D2UIso850Table must have one entry for every byte value");
 
 /* CP860 -> ISO-8859-1 */
 /* Non-convertible characters are converted to a dot (\x2e) */
 
-static int D2UIso860Table[256] = {
+static constexpr int D2UIso860Table[] = {
     '\x00', '\x01', '\x02', '\x03', '\x04', '\x05', '\x06', '\x07', '\x08', '\x09', '\x0a', '\x0b',
     '\x0c', '\x0d', '\x0e', '\x0f', '\x10', '\x11', '\x12', '\x13', '\x14', '\x15', '\x16', '\x17',
     '\x18', '\x19', '\x1a', '\x1b', '\x1c', '\x1d', '\x1e', '\x1f', '\x20', '\x21', '\x22', '\x23',
@@ -169,11 +217,13 @@ static int D2UIso860Table[256] = {
     '\x2e', '\xb1', '\x2e', '\x2e', '\x2e', '\x2e', '\xf7', '\x2e', '\xb0', '\x2e', '\xb7', '\x2e',
     '\x2e', '\xb2', '\x2e', '\xa0',
 };
+static_assert(sizeof(D2UIso860Table) / sizeof(D2UIso860Table[0]) == (size_t)D2U_CONV_TABLE_SIZE,
+              "D2UIso860Table must have one entry for every byte value");
 
 /* CP863 -> ISO-8859-1 */
 /* Non-convertible characters are converted to a dot (\x2e) */
 
-static int D2UIso863Table[256] = {
+static constexpr int D2UIso863Table[] = {
     '\x00', '\x01', '\x02', '\x03', '\x04', '\x05', '\x06', '\x07', '\x08', '\x09', '\x0a', '\x0b',
     '\x0c', '\x0d', '\x0e', '\x0f', '\x10', '\x11', '\x12', '\x13', '\x14', '\x15', '\x16', '\x17',
     '\x18', '\x19', '\x1a', '\x1b', '\x1c', '\x1d', '\x1e', '\x1f', '\x20', '\x21', '\x22', '\x23',
@@ -197,11 +247,13 @@ static int D2UIso863Table[256] = {
     '\x2e', '\xb1', '\x2e', '\x2e', '\x2e', '\x2e', '\xf7', '\x2e', '\xb0', '\x2e', '\xb7', '\x2e',
     '\x2e', '\xb2', '\x2e', '\xa0',
 };
+static_assert(sizeof(D2UIso863Table) / sizeof(D2UIso863Table[0]) == (size_t)D2U_CONV_TABLE_SIZE,
+              "D2UIso863Table must have one entry for every byte value");
 
 /* CP865 -> ISO-8859-1 */
 /* Non-convertible characters are converted to a dot (\x2e) */
 
-static int D2UIso865Table[256] = {
+static constexpr int D2UIso865Table[] = {
     '\x00', '\x01', '\x02', '\x03', '\x04', '\x05', '\x06', '\x07', '\x08', '\x09', '\x0a', '\x0b',
     '\x0c', '\x0d', '\x0e', '\x0f', '\x10', '\x11', '\x12', '\x13', '\x14', '\x15', '\x16', '\x17',
     '\x18', '\x19', '\x1a', '\x1b', '\x1c', '\x1d', '\x1e', '\x1f', '\x20', '\x21', '\x22', '\x23',
@@ -225,11 +277,13 @@ static int D2UIso865Table[256] = {
     '\x2e', '\xb1', '\x2e', '\x2e', '\x2e', '\x2e', '\xf7', '\x2e', '\xb0', '\x2e', '\xb7', '\x2e',
     '\x2e', '\xb2', '\x2e', '\xa0',
 };
+static_assert(sizeof(D2UIso865Table) / sizeof(D2UIso865Table[0]) == (size_t)D2U_CONV_TABLE_SIZE,
+              "D2UIso865Table must have one entry for every byte value");
 
 /* CP1252 -> ISO-8859-1 */
 /* Non-convertible characters are converted to a dot (\x2e) */
 
-static int D2UIso1252Table[256] = {
+static constexpr int D2UIso1252Table[] = {
     '\x00', '\x01', '\x02', '\x03', '\x04', '\x05', '\x06', '\x07', '\x08', '\x09', '\x0a', '\x0b',
     '\x0c', '\x0d', '\x0e', '\x0f', '\x10', '\x11', '\x12', '\x13', '\x14', '\x15', '\x16', '\x17',
     '\x18', '\x19', '\x1a', '\x1b', '\x1c', '\x1d', '\x1e', '\x1f', '\x20', '\x21', '\x22', '\x23',
@@ -253,11 +307,26 @@ static int D2UIso1252Table[256] = {
     '\xf0', '\xf1', '\xf2', '\xf3', '\xf4', '\xf5', '\xf6', '\xf7', '\xf8', '\xf9', '\xfa', '\xfb',
     '\xfc', '\xfd', '\xfe', '\xff',
 };
+static_assert(sizeof(D2UIso1252Table) / sizeof(D2UIso1252Table[0]) == (size_t)D2U_CONV_TABLE_SIZE,
+              "D2UIso1252Table must have one entry for every byte value");
 #endif
 
+/* Convert the text of stream ipInF to Unix line breaks and write it to stream
+ * ipOutF. ipFlag->FromToMode selects dos2unix (CR LF -> LF) or
+ * mac2unix (CR -> LF) conversion.
+ * ConvertDosToUnix() converts byte oriented text (ASCII, 8 bit code pages,
+ * UTF-8, GB18030). ConvertDosToUnixW() converts UTF-16 text and exists only
+ * with D2U_UNICODE. main() passes both to parse_options(), which calls them
+ * through function pointers for every file.
+ * Both return 0 on success and -1 on error; ipFlag->status and
+ * ipFlag->error tell what went wrong.
+ * [[nodiscard]] (ISO C23): the return value is the only sign that the output
+ * is incomplete, so a direct call must not ignore it. */
 #ifdef D2U_UNICODE
-int ConvertDosToUnixW(BufferedStream *ipInF, FILE *ipOutF, CFlag *ipFlag, const char *progname);
+[[nodiscard]] int ConvertDosToUnixW(BufferedStream *ipInF, FILE *ipOutF, CFlag *ipFlag,
+                                    const char *progname);
 #endif
-int ConvertDosToUnix(BufferedStream *ipInF, FILE *ipOutF, CFlag *ipFlag, const char *progname);
+[[nodiscard]] int ConvertDosToUnix(BufferedStream *ipInF, FILE *ipOutF, CFlag *ipFlag,
+                                   const char *progname);
 
 #endif
