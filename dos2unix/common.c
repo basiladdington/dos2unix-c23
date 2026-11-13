@@ -165,6 +165,17 @@ int d2u_ungetc(int c, BufferedStream *stream) {
  * truncated.
  * Deliberately not [[nodiscard]]: the function cannot fail and returns
  * dest, like strncpy(), only as a convenience. */
+/* Why this wrapper exists and strncpy() is not called directly:
+ * strncpy() writes no terminating null when src has dest_size or more
+ * characters, so dest is then not a string and reading it runs past the
+ * buffer. d2u_strncpy() always writes the null into the last byte, for
+ * every src. The price is that a src that is too long is truncated
+ * without an error (a DEBUG build reports it).
+ * It is used for every buffer that receives text of unknown length: the
+ * program name, the locale directory, the encoding names and, on
+ * Windows, the name of the temporary file. Plain
+ * strncpy() is only called in printInfo(), where the source is always a
+ * five character literal that fits its buffer including the null. */
 char *d2u_strncpy(char *dest, const char *src, size_t dest_size) {
     strncpy(dest, src, dest_size);
     dest[dest_size - 1] = '\0';
@@ -1006,6 +1017,18 @@ FILE *OpenInFile(char *ipFN) {
 /* On success *statbuf holds the fstat() data of the opened file. On
  * failure nullptr is returned and errno is set.
  * [[nodiscard]] in common.h (ISO C23): the result is an open stream. */
+/* Why the file is checked three times: testing a name and then opening it
+ * are two separate steps, and another process can replace the file by a
+ * symbolic link in between. Therefore
+ * - lstat() rejects a name that is not a regular file to begin with,
+ * - O_NOFOLLOW, where the system has it, makes open() itself refuse a
+ *   symbolic link,
+ * - fstat() on the opened descriptor must report the same device and
+ *   inode as lstat() did, which proves that the file that was opened is
+ *   the file that was checked (EAGAIN if not).
+ * O_NONBLOCK keeps open() from blocking when the name refers to a FIFO.
+ * The caller uses this function in old file mode when symbolic links are
+ * skipped, see ConvertNewFile(). */
 FILE *OpenInFileNoFollow(const char *ipFN, struct stat *statbuf) {
     struct stat PathStat;
     struct stat FileStat;
@@ -1861,6 +1884,21 @@ int check_unicode(BufferedStream *InF, FILE *TempF, CFlag *ipFlag, const char *i
  * in ipFlag->error (a real error). ipFlag->status is reset at the start.
  * [[nodiscard]] in common.h (ISO C23): the result tells if the file was
  * converted. */
+/* Why the output is written to a temporary file that is renamed at the end:
+ * - In old file mode the input and the output are the same file. Writing
+ *   into it directly would overwrite the input while it is still read.
+ * - When anything fails, the temporary file is removed and the output
+ *   file is as it was before. No half converted file is ever left under
+ *   the real name.
+ * - rename() puts the new file in place in one step: other processes see
+ *   either the complete old file or the complete new file. That only
+ *   works when both names are on the same file system. This is why
+ *   MakeTempFileFrom() creates the temporary file in the directory of the
+ *   output file (of the link target with -F) and not in a directory for
+ *   temporary files, which can be on another file system.
+ * - On the systems that define NEED_REMOVE (DOS, Windows, OS/2) rename()
+ *   cannot replace an existing file. The output file is removed first, so
+ *   the replacement is not one step there. */
 int ConvertNewFile(char *ipInFN, char *ipOutFN, CFlag *ipFlag, const char *progname,
                    int (*Convert)(BufferedStream *, FILE *, CFlag *, const char *)
 #ifdef D2U_UNICODE
@@ -1890,6 +1928,19 @@ int ConvertNewFile(char *ipInFN, char *ipOutFN, CFlag *ipFlag, const char *progn
 
     ipFlag->status = 0;
 
+    /* Why a symbolic link is skipped by default (-S, Follow is
+     * SYMLINK_SKIP): the output is made by renaming a new regular file to
+     * the output name. Done on the name of a symbolic link, that replaces
+     * the link itself by a regular file and leaves its target unconverted.
+     * What should happen is the choice of the user: -F converts the target
+     * and keeps the link, -R replaces the link by the converted file.
+     * Without that choice nothing is changed.
+     *
+     * AUDIT NOTE (comment audit, code unchanged): hard links have no such
+     * guard. st_nlink is not examined anywhere in this program. A file
+     * with more than one hard link is converted like any other file, and
+     * because of the rename() the converted name then refers to a new
+     * file while the other names keep the unconverted content. */
     /* Test if output file is a symbolic link */
     if (symbolic_link(ipOutFN) && !ipFlag->Follow) {
         ipFlag->status |= OUTPUTFILE_SYMLINK;
@@ -2046,6 +2097,28 @@ int ConvertNewFile(char *ipInFN, char *ipOutFN, CFlag *ipFlag, const char *progn
         RetVal = -1;
     }
 
+    /* Why the steps below are in this order. All of them work on the
+     * temporary file while it is still open. The output file is only
+     * touched by the rename() at the very end, so a step that fails leaves
+     * the output file as it was.
+     * 1. fflush(): all data is written before any metadata is set. A write
+     *    after step 4 would change the modification time again.
+     * 2. fchmod(): mkstemp() created the temporary file with private
+     *    permissions; it gets the permissions of the input file. In old
+     *    file mode exactly those, because the file replaces itself. In new
+     *    file mode reduced by the umask, like any newly created file.
+     * 3. fchown(), old file mode only: after fchmod(), because when it
+     *    fails and --allow-chown is used, the permissions are set once
+     *    more, as in new file mode, and that must override step 2. Note
+     *    that the system may clear the set-user-ID and set-group-ID bits
+     *    of step 2 when the owner changes.
+     * 4. futimens() or utime(), option -k only: after the last write, see
+     *    step 1. fchmod() and fchown() do not change the access time and
+     *    the modification time, so they need not come later.
+     * 5. fclose(), and then rename() to the output name.
+     * fchmod(), fchown() and futimens() take the file descriptor, see the
+     * comment below. utime() takes the path name; it is only the fallback
+     * where futimens() is not available. utimensat() is not used. */
     /* Flush buffered output before changing its timestamps.
      * The flush is required so that the final fclose() does not
      * refresh the timestamp after futimens(). */
@@ -3847,6 +3920,8 @@ void logBinaryCharW(CFlag *ipFlag, wint_t c, unsigned int line_nr, const char *p
 /* Return true when c is a binary character */
 /* bool since the ISO C23 modernization (it returned int 1 or 0 before);
  * [[nodiscard]] in common.h. */
+/* The exempted characters, and the reason for them, are the same as in
+ * binaryChar() below. */
 bool binaryCharW(wint_t c) {
     /* In C the result of '&&' has type int. The cast states the conversion
      * to the bool return type explicitly. */
@@ -3874,6 +3949,14 @@ void logBinaryChar(CFlag *ipFlag, int c, unsigned int line_nr, const char *progn
 /* Return true when c is a binary character */
 /* bool since the ISO C23 modernization (it returned int 1 or 0 before);
  * [[nodiscard]] in common.h. */
+/* Why four control characters are not binary: LF, CR, TAB and FF (form
+ * feed, a page break) are the control characters that ordinary text files
+ * contain. Every other character below space marks the file as binary. A
+ * binary file is skipped unless the conversion is forced with -f, because
+ * changing CR and LF bytes inside binary data damages the file.
+ * Note that 0x1A (Ctrl-Z, the DOS end of file mark) and 0x1B (ESC, the
+ * start of a terminal escape sequence) are not exempted: a text file that
+ * contains one of them is skipped as binary. */
 bool binaryChar(int c) {
     /* In C the result of '&&' has type int. The cast states the conversion
      * to the bool return type explicitly. */
