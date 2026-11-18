@@ -1,3 +1,7 @@
+[![C23 Standard](https://img.shields.io/badge/standard-ISO%20C23-blue.svg)](https://en.cppreference.com/w/c/23)
+[![Parity: 100%](https://img.shields.io/badge/parity-100%25%20byte--for--byte-success.svg)](README-C23.md)
+[![Warnings: 0](https://img.shields.io/badge/warnings-0-brightgreen.svg)](README-C23.md)
+
 > **ISO C23 Modernization Showcase (`c23-modernize` branch)**  
 > This repository modernizes the core C source files of `dos2unix` to **ISO C23 (`-std=c23`)** with **0 compiler warnings**, **0 ASan/UBSan reports**, **100% byte-for-byte CLI parity across 235+ test cases**, and a **40%+ reduction in `clang-tidy` warnings**.  
 > 👉 **[Read the Full Case Study, Engineering Process & Metrics (`README-C23.md`)](README-C23.md)** | **[AI Workflow & Audit Guardrails (`CLAUDE.md`)](CLAUDE.md)**
